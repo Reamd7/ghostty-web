@@ -931,13 +931,18 @@ export class InputHandler {
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
-    // Determine which button to report (or 32 for motion with no button)
-    let button = 32; // Motion flag
+    // Determine which button to report. Motion events carry the held
+    // button's number; with NO button held the button field must be 3 (the
+    // "no button" code) — i.e. 35 total, matching xterm.js. Reporting 32+0
+    // (left) instead makes applications read plain hovers as drags.
+    let button: number;
     if (this.mouseButtonsPressed & 1)
-      button += 0; // Left
+      button = 32; // motion + left
     else if (this.mouseButtonsPressed & 2)
-      button += 1; // Middle
-    else if (this.mouseButtonsPressed & 4) button += 2; // Right
+      button = 33; // motion + middle
+    else if (this.mouseButtonsPressed & 4)
+      button = 34; // motion + right
+    else button = 35; // motion + no button
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
   }

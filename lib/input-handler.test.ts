@@ -1333,10 +1333,10 @@ describe('InputHandler mouse tracking', () => {
     expect(dataReceived).toEqual([]);
   });
 
-  test('any motion reports without a press (mode 1003)', () => {
+  test('any motion without a press reports button 35 — no-button drag code (mode 1003)', () => {
     createMouseHandler({ 1003: true });
     dispatch('mousemove', makeMouseEvent('mousemove'));
-    expect(dataReceived).toEqual(['\x1b[<32;2;2M']);
+    expect(dataReceived).toEqual(['\x1b[<35;2;2M']);
   });
 
   test('encodes urxvt decimal mode 1015 with release as button 3', () => {
