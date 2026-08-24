@@ -444,6 +444,7 @@ export class Terminal implements ITerminalCore {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
         },
+        getGridSize: () => ({ cols: this.cols, rows: this.rows }),
       };
 
       // Create input handler

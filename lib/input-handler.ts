@@ -170,6 +170,11 @@ export interface MouseTrackingConfig {
   getCellDimensions: () => { width: number; height: number };
   /** Get canvas/container offset for accurate position calculation */
   getCanvasOffset: () => { left: number; top: number };
+  /**
+   * Grid size for clamping reported cells to the viewport. Optional for
+   * backwards compatibility; without it cells are only clamped to >= 1.
+   */
+  getGridSize?: () => { cols: number; rows: number };
 }
 
 export class InputHandler {
@@ -302,7 +307,12 @@ export class InputHandler {
     this.container.addEventListener('mousedown', this.mousedownListener);
 
     this.mouseupListener = this.handleMouseUp.bind(this);
-    this.container.addEventListener('mouseup', this.mouseupListener);
+    // Document-level mouseup: a press that started inside the terminal can
+    // be released anywhere on the page. Missing that release would latch the
+    // button bit and turn every later hover into a phantom drag report.
+    if (typeof document !== 'undefined') {
+      document.addEventListener('mouseup', this.mouseupListener);
+    }
 
     this.mousemoveListener = this.handleMouseMove.bind(this);
     this.container.addEventListener('mousemove', this.mousemoveListener);
@@ -734,14 +744,16 @@ export class InputHandler {
     const x = event.clientX - offset.left;
     const y = event.clientY - offset.top;
 
-    // Convert to 1-based cell coordinates (terminal uses 1-based)
-    const col = Math.floor(x / dims.width) + 1;
-    const row = Math.floor(y / dims.height) + 1;
-
-    // Clamp to valid range (at least 1)
+    // Convert to 1-based cell coordinates (terminal uses 1-based), clamped
+    // to the grid: applications never expect cells outside the viewport, and
+    // releases far outside the terminal would otherwise report huge values.
+    const col = Math.max(1, Math.floor(x / dims.width) + 1);
+    const row = Math.max(1, Math.floor(y / dims.height) + 1);
+    const grid = this.mouseConfig.getGridSize?.();
+    if (!grid) return { col, row };
     return {
-      col: Math.max(1, col),
-      row: Math.max(1, row),
+      col: Math.min(col, Math.max(1, grid.cols)),
+      row: Math.min(row, Math.max(1, grid.rows)),
     };
   }
 
@@ -876,19 +888,22 @@ export class InputHandler {
    * Handle mouseup event
    */
   private handleMouseUp(event: MouseEvent): void {
+    // Clear the latch first, unconditionally: a press can be released while
+    // tracking is off, after dispose, or outside the terminal. A stale latch
+    // would report every later hover as a phantom button-drag motion.
+    const button = event.button;
+    const hadPress = (this.mouseButtonsPressed & (1 << button)) !== 0;
+    this.mouseButtonsPressed &= ~(1 << button);
+
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
-    const button = event.button;
-
     // Only report releases for presses we reported: a shift-bypassed press
     // (host selection) must not produce an unmatched release, and neither
     // may a press that predates tracking being enabled.
-    const hadPress = (this.mouseButtonsPressed & (1 << button)) !== 0;
-    this.mouseButtonsPressed &= ~(1 << button);
     if (!hadPress) return;
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
@@ -1133,10 +1148,13 @@ export class InputHandler {
     }
 
     if (this.mouseupListener) {
-      this.container.removeEventListener('mouseup', this.mouseupListener);
+      // Registered on the document (not the container) so releases outside
+      // the terminal still clear the button latch.
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('mouseup', this.mouseupListener);
+      }
       this.mouseupListener = null;
     }
-
     if (this.mousemoveListener) {
       this.container.removeEventListener('mousemove', this.mousemoveListener);
       this.mousemoveListener = null;
@@ -1147,6 +1165,7 @@ export class InputHandler {
       this.wheelListener = null;
     }
 
+    this.mouseButtonsPressed = 0;
     this.isDisposed = true;
   }
 

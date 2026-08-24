@@ -2,7 +2,7 @@
  * Unit tests for InputHandler
  */
 
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { Ghostty } from './ghostty';
 import { InputHandler } from './input-handler';
 import { Key, KeyAction, Mods } from './types';
@@ -1203,11 +1203,21 @@ describe('InputHandler mouse tracking', () => {
   let ghostty: Ghostty;
   let container: MockContainerListeners;
   let dataReceived: string[];
+  let handlers: InputHandler[];
 
   beforeEach(async () => {
     ghostty = await Ghostty.load();
     container = createMockContainer();
     dataReceived = [];
+    handlers = [];
+  });
+
+  afterEach(() => {
+    // Handlers register a document-level mouseup listener; without disposal
+    // they leak across tests and fire on later tests' mouseup dispatches.
+    for (const handler of handlers) {
+      handler.dispose();
+    }
   });
 
   interface MockMouseEvent {
@@ -1251,9 +1261,9 @@ describe('InputHandler mouse tracking', () => {
   // clientX 15 with 10px cells -> col 2; clientY 25 with 20px rows -> row 2.
   const createMouseHandler = (
     modes: Record<number, boolean>,
-    opts: { tracking?: boolean; sgr?: boolean } = {}
-  ): InputHandler =>
-    new InputHandler(
+    opts: { tracking?: boolean; sgr?: boolean; grid?: { cols: number; rows: number } } = {}
+  ): InputHandler => {
+    const handler = new InputHandler(
       ghostty,
       // Mock container stands in for the DOM host element; InputHandler only
       // needs addEventListener/removeEventListener from the HTMLElement shape.
@@ -1270,8 +1280,12 @@ describe('InputHandler mouse tracking', () => {
         hasSgrMouseMode: () => opts.sgr ?? true,
         getCellDimensions: () => ({ width: 10, height: 20 }),
         getCanvasOffset: () => ({ left: 0, top: 0 }),
+        ...(opts.grid ? { getGridSize: () => opts.grid! } : {}),
       }
     );
+    handlers.push(handler);
+    return handler;
+  };
 
   const dispatch = (type: string, event: MockMouseEvent): void => {
     for (const handler of container._listeners.get(type) || []) {
@@ -1279,10 +1293,24 @@ describe('InputHandler mouse tracking', () => {
     }
   };
 
+  // mouseup listens on the document (releases outside the terminal must still
+  // clear the button latch), so dispatch a real DOM event for it.
+  const dispatchDocumentMouseUp = (opts: MockMouseOptions = {}): void => {
+    document.dispatchEvent(
+      new MouseEvent('mouseup', {
+        button: opts.button ?? 0,
+        clientX: opts.clientX ?? 15,
+        clientY: opts.clientY ?? 25,
+        shiftKey: opts.shiftKey ?? false,
+        ctrlKey: opts.ctrlKey ?? false,
+      })
+    );
+  };
+
   test('encodes SGR press and release (mode 1006)', () => {
     createMouseHandler({});
     dispatch('mousedown', makeMouseEvent('mousedown'));
-    dispatch('mouseup', makeMouseEvent('mouseup'));
+    dispatchDocumentMouseUp();
     expect(dataReceived).toEqual(['\x1b[<0;2;2M', '\x1b[<0;2;2m']);
   });
 
@@ -1314,7 +1342,7 @@ describe('InputHandler mouse tracking', () => {
   test('encodes urxvt decimal mode 1015 with release as button 3', () => {
     createMouseHandler({ 1015: true }, { sgr: false });
     dispatch('mousedown', makeMouseEvent('mousedown'));
-    dispatch('mouseup', makeMouseEvent('mouseup'));
+    dispatchDocumentMouseUp();
     expect(dataReceived).toEqual(['\x1b[0;2;2M', '\x1b[3;2;2M']);
   });
 
@@ -1335,7 +1363,7 @@ describe('InputHandler mouse tracking', () => {
   test('encodes legacy X10 with +32 bytes and release as button 3', () => {
     createMouseHandler({}, { sgr: false });
     dispatch('mousedown', makeMouseEvent('mousedown'));
-    dispatch('mouseup', makeMouseEvent('mouseup'));
+    dispatchDocumentMouseUp();
     expect(dataReceived).toEqual(['\x1b[M ""', '\x1b[M#""']);
   });
 
@@ -1343,14 +1371,14 @@ describe('InputHandler mouse tracking', () => {
     createMouseHandler({ 1002: true });
     dispatch('mousedown', makeMouseEvent('mousedown', { shiftKey: true }));
     dispatch('mousemove', makeMouseEvent('mousemove', { shiftKey: true }));
-    dispatch('mouseup', makeMouseEvent('mouseup', { shiftKey: true }));
+    dispatchDocumentMouseUp({ shiftKey: true });
     dispatch('wheel', makeMouseEvent('wheel', { shiftKey: true, deltaY: -33 }));
     expect(dataReceived).toEqual([]);
   });
 
   test('release without a reported press is not sent', () => {
     createMouseHandler({});
-    dispatch('mouseup', makeMouseEvent('mouseup'));
+    dispatchDocumentMouseUp();
     expect(dataReceived).toEqual([]);
   });
 
@@ -1378,5 +1406,89 @@ describe('InputHandler mouse tracking', () => {
     dispatch('mousemove', makeMouseEvent('mousemove'));
     dispatch('wheel', makeMouseEvent('wheel', { deltaY: -33 }));
     expect(dataReceived).toEqual([]);
+  });
+
+  test('release outside the terminal clears the drag latch (no phantom hover drags)', () => {
+    createMouseHandler({ 1002: true });
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    // Released over the document, far outside the terminal container.
+    dispatchDocumentMouseUp({ clientX: 900, clientY: 500 });
+    expect(dataReceived).toEqual(['\x1b[<0;2;2M', '\x1b[<0;91;26m']);
+
+    // Hover after the outside release must stay silent under mode 1002.
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    expect(dataReceived).toEqual(['\x1b[<0;2;2M', '\x1b[<0;91;26m']);
+  });
+
+  test('release while tracking is disabled still clears the latch', () => {
+    let tracking = true;
+    const handler = new InputHandler(
+      ghostty,
+      container as unknown as HTMLElement,
+      (data) => dataReceived.push(data),
+      () => {},
+      undefined,
+      undefined,
+      (mode: number) => (mode === 1002 ? true : false),
+      undefined,
+      undefined,
+      {
+        hasMouseTracking: () => tracking,
+        hasSgrMouseMode: () => true,
+        getCellDimensions: () => ({ width: 10, height: 20 }),
+        getCanvasOffset: () => ({ left: 0, top: 0 }),
+      }
+    );
+    handlers.push(handler);
+    expect(handler.isActive()).toBe(true);
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    tracking = false; // TUI exits mid-press
+    dispatchDocumentMouseUp();
+    tracking = true; // TUI returns
+
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    expect(dataReceived).toEqual(['\x1b[<0;2;2M']);
+  });
+
+  test('cells clamp to the grid size', () => {
+    createMouseHandler({}, { grid: { cols: 80, rows: 24 } });
+    dispatch('mousedown', makeMouseEvent('mousedown', { clientX: 5000, clientY: 900 }));
+    expect(dataReceived).toEqual(['\x1b[<0;80;24M']);
+  });
+
+  test('motion gating follows the real core modes', () => {
+    const wasmTerm = ghostty.createTerminal(80, 24);
+    const handler = new InputHandler(
+      ghostty,
+      container as unknown as HTMLElement,
+      (data) => dataReceived.push(data),
+      () => {},
+      undefined,
+      undefined,
+      (mode: number) => wasmTerm.getMode(mode, false),
+      undefined,
+      undefined,
+      {
+        hasMouseTracking: () => wasmTerm.hasMouseTracking(),
+        hasSgrMouseMode: () => wasmTerm.getMode(1006, false),
+        getCellDimensions: () => ({ width: 10, height: 20 }),
+        getCanvasOffset: () => ({ left: 0, top: 0 }),
+        getGridSize: () => ({ cols: 80, rows: 24 }),
+      }
+    );
+    handlers.push(handler);
+    expect(handler.isActive()).toBe(true);
+    // vim-style enable: normal tracking + SGR only — hover stays silent.
+    wasmTerm.write('\x1b[?1000h\x1b[?1006h');
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    expect(dataReceived).toEqual([]);
+
+    // Button-event tracking turns motion into drag reports while held.
+    wasmTerm.write('\x1b[?1002h');
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    dispatch('mousemove', makeMouseEvent('mousemove', { clientX: 25 }));
+    expect(dataReceived).toEqual(['\x1b[<0;2;2M', '\x1b[<32;3;2M']);
+
+    wasmTerm.free();
   });
 });
