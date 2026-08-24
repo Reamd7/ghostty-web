@@ -644,10 +644,19 @@ export class CanvasRenderer {
       // Cell has additional codepoints - get full grapheme cluster
       char = this.currentBuffer.getGraphemeString(y, x);
     } else {
-      // Simple cell - single codepoint
-      char = String.fromCodePoint(cell.codepoint || 32); // Default to space if null
+      // Simple cell - single codepoint. Guard invalid and surrogate codepoints
+      // (they would throw fromCodePoint or draw mojibake).
+      const cp = cell.codepoint;
+      char =
+        cp == null || cp <= 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)
+          ? ' '
+          : String.fromCodePoint(cp);
     }
-    this.ctx.fillText(char, textX, textY);
+    // Block elements render as exact cell geometry (fonts rarely ship correct
+    // glyphs/vertical metrics for U+2580..U+259F, breaking TUI rules and bars).
+    if (!this.renderBlockChar(cell.codepoint || 32, cellX, cellY, cellWidth)) {
+      this.ctx.fillText(char, textX, textY);
+    }
 
     // Reset alpha
     if (cell.flags & CellFlags.FAINT) {
@@ -710,6 +719,121 @@ export class CanvasRenderer {
         this.ctx.lineTo(cellX + cellWidth, underlineY);
         this.ctx.stroke();
       }
+    }
+  }
+
+  /**
+   * Render Unicode block elements (U+2580..U+259F, minus the shade trio) as
+   * exact cell geometry. Ported from OpenChamber's ghostty-web 0.4.0 dist
+   * patch so rebuilds keep identical block rendering. Returns false for
+   * non-block codepoints so the caller falls back to fillText.
+   */
+  private renderBlockChar(
+    codepoint: number,
+    cellX: number,
+    cellY: number,
+    cellWidth: number
+  ): boolean {
+    const cellHeight = this.metrics.height;
+    const halfW = cellWidth / 2;
+    const halfH = cellHeight / 2;
+    const ctx = this.ctx;
+    switch (codepoint) {
+      case 0x2580:
+        ctx.fillRect(cellX, cellY, cellWidth, halfH);
+        return true;
+      case 0x2581:
+        ctx.fillRect(cellX, cellY + (cellHeight * 7) / 8, cellWidth, cellHeight / 8);
+        return true;
+      case 0x2582:
+        ctx.fillRect(cellX, cellY + (cellHeight * 3) / 4, cellWidth, cellHeight / 4);
+        return true;
+      case 0x2583:
+        ctx.fillRect(cellX, cellY + (cellHeight * 5) / 8, cellWidth, (cellHeight * 3) / 8);
+        return true;
+      case 0x2584:
+        ctx.fillRect(cellX, cellY + halfH, cellWidth, halfH);
+        return true;
+      case 0x2585:
+        ctx.fillRect(cellX, cellY + (cellHeight * 3) / 8, cellWidth, (cellHeight * 5) / 8);
+        return true;
+      case 0x2586:
+        ctx.fillRect(cellX, cellY + cellHeight / 4, cellWidth, (cellHeight * 3) / 4);
+        return true;
+      case 0x2587:
+        ctx.fillRect(cellX, cellY + cellHeight / 8, cellWidth, (cellHeight * 7) / 8);
+        return true;
+      case 0x2588:
+        ctx.fillRect(cellX, cellY, cellWidth, cellHeight);
+        return true;
+      case 0x2589:
+        ctx.fillRect(cellX, cellY, (cellWidth * 7) / 8, cellHeight);
+        return true;
+      case 0x258a:
+        ctx.fillRect(cellX, cellY, (cellWidth * 3) / 4, cellHeight);
+        return true;
+      case 0x258b:
+        ctx.fillRect(cellX, cellY, (cellWidth * 5) / 8, cellHeight);
+        return true;
+      case 0x258c:
+        ctx.fillRect(cellX, cellY, halfW, cellHeight);
+        return true;
+      case 0x258d:
+        ctx.fillRect(cellX, cellY, (cellWidth * 3) / 8, cellHeight);
+        return true;
+      case 0x258e:
+        ctx.fillRect(cellX, cellY, cellWidth / 4, cellHeight);
+        return true;
+      case 0x258f:
+        ctx.fillRect(cellX, cellY, cellWidth / 8, cellHeight);
+        return true;
+      case 0x2590:
+        ctx.fillRect(cellX + halfW, cellY, halfW, cellHeight);
+        return true;
+      case 0x2594:
+        ctx.fillRect(cellX, cellY, cellWidth, cellHeight / 8);
+        return true;
+      case 0x2595:
+        ctx.fillRect(cellX + (cellWidth * 7) / 8, cellY, cellWidth / 8, cellHeight);
+        return true;
+      case 0x2596:
+        ctx.fillRect(cellX, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x2597:
+        ctx.fillRect(cellX + halfW, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x2598:
+        ctx.fillRect(cellX, cellY, halfW, halfH);
+        return true;
+      case 0x2599:
+        ctx.fillRect(cellX, cellY, halfW, cellHeight);
+        ctx.fillRect(cellX + halfW, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x259a:
+        ctx.fillRect(cellX, cellY, halfW, halfH);
+        ctx.fillRect(cellX + halfW, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x259b:
+        ctx.fillRect(cellX, cellY, cellWidth, halfH);
+        ctx.fillRect(cellX, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x259c:
+        ctx.fillRect(cellX, cellY, cellWidth, halfH);
+        ctx.fillRect(cellX + halfW, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x259d:
+        ctx.fillRect(cellX + halfW, cellY, halfW, halfH);
+        return true;
+      case 0x259e:
+        ctx.fillRect(cellX + halfW, cellY, halfW, halfH);
+        ctx.fillRect(cellX, cellY + halfH, halfW, halfH);
+        return true;
+      case 0x259f:
+        ctx.fillRect(cellX + halfW, cellY, halfW, cellHeight);
+        ctx.fillRect(cellX, cellY + halfH, halfW, halfH);
+        return true;
+      default:
+        return false;
     }
   }
 
