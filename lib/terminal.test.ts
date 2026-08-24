@@ -3201,3 +3201,108 @@ describe('Synchronous open()', () => {
     term.dispose();
   });
 });
+
+describe('wheel arbitration with mouse tracking', () => {
+  let container: HTMLElement | null = null;
+
+  beforeEach(() => {
+    if (typeof document !== 'undefined') {
+      container = document.createElement('div');
+      document.body.appendChild(container);
+    }
+  });
+
+  afterEach(() => {
+    if (container && container.parentNode) {
+      container.parentNode.removeChild(container);
+      container = null;
+    }
+  });
+
+  /** Minimal WheelEvent stand-in for the private handleWheel entry point. */
+  interface MockWheel {
+    deltaY: number;
+    shiftKey: boolean;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  }
+
+  test('tracked alt-screen wheel reports nothing and keeps propagation open', async () => {
+    if (!container) return;
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    term.write('\x1b[?1049h\x1b[?1000h'); // alt screen + mouse tracking
+
+    expect(term.hasMouseTracking()).toBe(true);
+
+    const data: string[] = [];
+    term.onData((d) => data.push(d));
+
+    let prevented = false;
+    let stopped = false;
+    const wheel = {
+      deltaY: -33,
+      shiftKey: false,
+      preventDefault: () => {
+        prevented = true;
+      },
+      stopPropagation: () => {
+        stopped = true;
+      },
+    } satisfies MockWheel;
+    // Private arrow-property on Terminal: exercised directly so the test does
+    // not depend on happy-dom canvas metrics for a real wheel dispatch.
+    const harness = term as unknown as { handleWheel: (e: MockWheel) => void };
+    harness.handleWheel(wheel);
+
+    expect(data.filter((d) => d === '\x1b[A' || d === '\x1b[B')).toEqual([]);
+    expect(prevented).toBe(true);
+    // stopPropagation would cancel InputHandler's bubble listener on the same
+    // container, which is what reports the wheel to the application.
+    expect(stopped).toBe(false);
+    term.dispose();
+  });
+
+  test('shift wheel in tracked alt screen falls back to arrow keys', async () => {
+    if (!container) return;
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    term.write('\x1b[?1049h\x1b[?1000h');
+
+    const data: string[] = [];
+    term.onData((d) => data.push(d));
+
+    const wheel = {
+      deltaY: -33,
+      shiftKey: true,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    } satisfies MockWheel;
+    const harness = term as unknown as { handleWheel: (e: MockWheel) => void };
+    harness.handleWheel(wheel);
+
+    expect(data).toContain('\x1b[A');
+    term.dispose();
+  });
+
+  test('untracked alt-screen wheel sends arrow-key fallback', async () => {
+    if (!container) return;
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    term.write('\x1b[?1049h');
+
+    const data: string[] = [];
+    term.onData((d) => data.push(d));
+
+    const wheel = {
+      deltaY: 33,
+      shiftKey: false,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    } satisfies MockWheel;
+    const harness = term as unknown as { handleWheel: (e: MockWheel) => void };
+    harness.handleWheel(wheel);
+    expect(data).toContain('\x1b[B');
+    term.dispose();
+  });
+});

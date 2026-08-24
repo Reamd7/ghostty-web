@@ -442,6 +442,12 @@ export class SelectionManager {
           canvas.parentElement.focus();
         }
 
+        // When the application owns mouse reporting, clicks belong to it —
+        // only the shift bypass starts a host selection.
+        if (this.wasmTerm.hasMouseTracking() && !e.shiftKey) {
+          return;
+        }
+
         const cell = this.pixelToCell(e.offsetX, e.offsetY);
 
         // Always clear previous selection on new click
@@ -597,9 +603,10 @@ export class SelectionManager {
     // Handle click events for double-click (word) and triple-click (line) selection
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
     canvas.addEventListener('click', (e: MouseEvent) => {
+      // Application-owned clicks (no shift bypass) never select words/lines
+      if (this.wasmTerm.hasMouseTracking() && !e.shiftKey) return;
       // event.detail: 1 = single, 2 = double, 3 = triple click
       if (e.detail === 2) {
-        // Double-click - select word
         const cell = this.pixelToCell(e.offsetX, e.offsetY);
         const word = this.getWordAtCell(cell.col, cell.row);
 

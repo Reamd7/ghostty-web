@@ -1557,10 +1557,23 @@ export class Terminal implements ITerminalCore {
   private handleWheel = (e: WheelEvent): void => {
     // Always prevent default browser scrolling
     e.preventDefault();
-    e.stopPropagation();
+
+    // When the application tracks the mouse the wheel belongs to it:
+    // InputHandler's bubble-phase listener on this same container reports it,
+    // so we must NOT stopPropagation (that would cancel the remaining phases
+    // on this element) and must not run the local arrow/scroll fallbacks.
+    // Shift bypasses reporting and hands the wheel back to the host.
+    const appTracksWheel = (this.wasmTerm?.hasMouseTracking() ?? false) && !e.shiftKey;
+    if (!appTracksWheel) {
+      e.stopPropagation();
+    }
 
     // Allow custom handler to override
     if (this.customWheelEventHandler && this.customWheelEventHandler(e)) {
+      return;
+    }
+
+    if (appTracksWheel) {
       return;
     }
 

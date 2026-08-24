@@ -1193,3 +1193,190 @@ describe('InputHandler', () => {
     });
   });
 });
+
+describe('InputHandler mouse tracking', () => {
+  /** Listener registry surface of the mock container these tests rely on. */
+  interface MockContainerListeners {
+    _listeners: Map<string, ((event: never) => void)[]>;
+  }
+
+  let ghostty: Ghostty;
+  let container: MockContainerListeners;
+  let dataReceived: string[];
+
+  beforeEach(async () => {
+    ghostty = await Ghostty.load();
+    container = createMockContainer();
+    dataReceived = [];
+  });
+
+  interface MockMouseEvent {
+    type: string;
+    button: number;
+    clientX: number;
+    clientY: number;
+    shiftKey: boolean;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    deltaY: number;
+    deltaMode: number;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  }
+
+  interface MockMouseOptions {
+    button?: number;
+    clientX?: number;
+    clientY?: number;
+    shiftKey?: boolean;
+    ctrlKey?: boolean;
+    deltaY?: number;
+    deltaMode?: number;
+  }
+
+  const makeMouseEvent = (type: string, opts: MockMouseOptions = {}): MockMouseEvent => ({
+    type,
+    button: opts.button ?? 0,
+    clientX: opts.clientX ?? 15,
+    clientY: opts.clientY ?? 25,
+    shiftKey: opts.shiftKey ?? false,
+    ctrlKey: opts.ctrlKey ?? false,
+    metaKey: false,
+    deltaY: opts.deltaY ?? 0,
+    deltaMode: opts.deltaMode ?? 0,
+    preventDefault: mock(() => {}),
+    stopPropagation: mock(() => {}),
+  });
+
+  // clientX 15 with 10px cells -> col 2; clientY 25 with 20px rows -> row 2.
+  const createMouseHandler = (
+    modes: Record<number, boolean>,
+    opts: { tracking?: boolean; sgr?: boolean } = {}
+  ): InputHandler =>
+    new InputHandler(
+      ghostty,
+      // Mock container stands in for the DOM host element; InputHandler only
+      // needs addEventListener/removeEventListener from the HTMLElement shape.
+      container as unknown as HTMLElement,
+      (data) => dataReceived.push(data),
+      () => {},
+      undefined,
+      undefined,
+      (mode: number) => modes[mode] ?? false,
+      undefined,
+      undefined,
+      {
+        hasMouseTracking: () => opts.tracking ?? true,
+        hasSgrMouseMode: () => opts.sgr ?? true,
+        getCellDimensions: () => ({ width: 10, height: 20 }),
+        getCanvasOffset: () => ({ left: 0, top: 0 }),
+      }
+    );
+
+  const dispatch = (type: string, event: MockMouseEvent): void => {
+    for (const handler of container._listeners.get(type) || []) {
+      handler(event as never);
+    }
+  };
+
+  test('encodes SGR press and release (mode 1006)', () => {
+    createMouseHandler({});
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    dispatch('mouseup', makeMouseEvent('mouseup'));
+    expect(dataReceived).toEqual(['\x1b[<0;2;2M', '\x1b[<0;2;2m']);
+  });
+
+  test('adds SGR modifier bits (ctrl = 16)', () => {
+    createMouseHandler({});
+    dispatch('mousedown', makeMouseEvent('mousedown', { ctrlKey: true }));
+    expect(dataReceived).toEqual(['\x1b[<16;2;2M']);
+  });
+
+  test('encodes button motion as button 32 (mode 1002)', () => {
+    createMouseHandler({ 1002: true });
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    expect(dataReceived).toEqual(['\x1b[<0;2;2M', '\x1b[<32;2;2M']);
+  });
+
+  test('button motion without a press is not reported', () => {
+    createMouseHandler({ 1002: true });
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    expect(dataReceived).toEqual([]);
+  });
+
+  test('any motion reports without a press (mode 1003)', () => {
+    createMouseHandler({ 1003: true });
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    expect(dataReceived).toEqual(['\x1b[<32;2;2M']);
+  });
+
+  test('encodes urxvt decimal mode 1015 with release as button 3', () => {
+    createMouseHandler({ 1015: true }, { sgr: false });
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    dispatch('mouseup', makeMouseEvent('mouseup'));
+    expect(dataReceived).toEqual(['\x1b[0;2;2M', '\x1b[3;2;2M']);
+  });
+
+  test('encodes UTF-8 extended mode 1005 with codepoint payload', () => {
+    createMouseHandler({ 1005: true }, { sgr: false });
+    // col = floor(995/10)+1 = 100 -> codepoint 132
+    dispatch('mousedown', makeMouseEvent('mousedown', { clientX: 995 }));
+    expect(dataReceived).toEqual(['\x1b[M \u0084"']);
+  });
+
+  test('drops UTF-8 events beyond the 2015 codepoint window', () => {
+    createMouseHandler({ 1005: true }, { sgr: false });
+    // col = floor(19995/10)+1 = 2000 -> 2032 > 2015
+    dispatch('mousedown', makeMouseEvent('mousedown', { clientX: 19995 }));
+    expect(dataReceived).toEqual([]);
+  });
+
+  test('encodes legacy X10 with +32 bytes and release as button 3', () => {
+    createMouseHandler({}, { sgr: false });
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    dispatch('mouseup', makeMouseEvent('mouseup'));
+    expect(dataReceived).toEqual(['\x1b[M ""', '\x1b[M#""']);
+  });
+
+  test('shift bypasses reporting entirely', () => {
+    createMouseHandler({ 1002: true });
+    dispatch('mousedown', makeMouseEvent('mousedown', { shiftKey: true }));
+    dispatch('mousemove', makeMouseEvent('mousemove', { shiftKey: true }));
+    dispatch('mouseup', makeMouseEvent('mouseup', { shiftKey: true }));
+    dispatch('wheel', makeMouseEvent('wheel', { shiftKey: true, deltaY: -33 }));
+    expect(dataReceived).toEqual([]);
+  });
+
+  test('release without a reported press is not sent', () => {
+    createMouseHandler({});
+    dispatch('mouseup', makeMouseEvent('mouseup'));
+    expect(dataReceived).toEqual([]);
+  });
+
+  test('wheel sends one report per notch in pixel mode', () => {
+    createMouseHandler({});
+    dispatch('wheel', makeMouseEvent('wheel', { deltaY: -33 }));
+    dispatch('wheel', makeMouseEvent('wheel', { deltaY: 100 }));
+    expect(dataReceived).toEqual([
+      '\x1b[<64;2;2M',
+      '\x1b[<65;2;2M',
+      '\x1b[<65;2;2M',
+      '\x1b[<65;2;2M',
+    ]);
+  });
+
+  test('wheel counts lines directly in line mode', () => {
+    createMouseHandler({});
+    dispatch('wheel', makeMouseEvent('wheel', { deltaY: 2, deltaMode: 1 }));
+    expect(dataReceived).toEqual(['\x1b[<65;2;2M', '\x1b[<65;2;2M']);
+  });
+
+  test('nothing is reported when tracking is off', () => {
+    createMouseHandler({}, { tracking: false });
+    dispatch('mousedown', makeMouseEvent('mousedown'));
+    dispatch('mousemove', makeMouseEvent('mousemove'));
+    dispatch('wheel', makeMouseEvent('wheel', { deltaY: -33 }));
+    expect(dataReceived).toEqual([]);
+  });
+});

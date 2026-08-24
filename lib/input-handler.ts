@@ -797,20 +797,51 @@ export class InputHandler {
   ): void {
     const modifiers = this.getMouseModifiers(event);
 
-    // Check if SGR extended mode is enabled (mode 1006)
+    // Encoding priority mirrors xterm.js: SGR (1006) > urxvt decimal (1015) >
+    // UTF-8 extended (1005) > legacy X10. The legacy encodings cannot express
+    // release events, so they report button 3 (release) like X10 does.
     const useSGR = this.mouseConfig?.hasSgrMouseMode?.() ?? true;
 
-    let sequence: string;
+    let sequence: string | null;
     if (useSGR) {
       sequence = this.encodeMouseSGR(button, col, row, isRelease, modifiers);
+    } else if (this.getModeCallback?.(1015) ?? false) {
+      sequence = this.encodeMouseUrxvt(isRelease ? 3 : button, col, row, modifiers);
+    } else if (this.getModeCallback?.(1005) ?? false) {
+      sequence = this.encodeMouseUtf8(isRelease ? 3 : button, col, row, modifiers);
     } else {
-      // X10/normal mode doesn't support release events directly
-      // Button 3 means release in X10 mode
-      const x10Button = isRelease ? 3 : button;
-      sequence = this.encodeMouseX10(x10Button, col, row, modifiers);
+      sequence = this.encodeMouseX10(isRelease ? 3 : button, col, row, modifiers);
     }
 
-    this.onDataCallback(sequence);
+    if (sequence !== null) {
+      this.onDataCallback(sequence);
+    }
+  }
+
+  /**
+   * Encode mouse event as urxvt decimal sequence (mode 1015)
+   * Format: \x1b[Btn;Col;RowM — no release form, callers pass button 3.
+   */
+  private encodeMouseUrxvt(button: number, col: number, row: number, modifiers: number): string {
+    return `\x1b[${button + modifiers};${col};${row}M`;
+  }
+
+  /**
+   * Encode mouse event as UTF-8 extended sequence (mode 1005)
+   * Like X10 but every value is a codepoint (values >127 serialize as UTF-8).
+   * Values above 2015 cannot be expressed; return null to drop the event.
+   */
+  private encodeMouseUtf8(
+    button: number,
+    col: number,
+    row: number,
+    modifiers: number
+  ): string | null {
+    const btn = button + modifiers + 32;
+    const colCp = col + 32;
+    const rowCp = row + 32;
+    if (btn > 255 || colCp > 2015 || rowCp > 2015) return null;
+    return `\x1b[M${String.fromCodePoint(btn)}${String.fromCodePoint(colCp)}${String.fromCodePoint(rowCp)}`;
   }
 
   /**
@@ -819,6 +850,9 @@ export class InputHandler {
   private handleMouseDown(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    // Shift is the host-selection bypass: the application does not see
+    // shifted clicks (universal terminal convention).
+    if (event.shiftKey) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -833,9 +867,9 @@ export class InputHandler {
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
 
-    // Don't prevent default - let SelectionManager handle selection
-    // Only prevent if we actually handled the event
-    // event.preventDefault();
+    // The application owns this click: suppress the native selection drag.
+    // SelectionManager skips its own handling via hasMouseTracking().
+    event.preventDefault();
   }
 
   /**
@@ -850,8 +884,12 @@ export class InputHandler {
 
     const button = event.button;
 
-    // Clear pressed button
+    // Only report releases for presses we reported: a shift-bypassed press
+    // (host selection) must not produce an unmatched release, and neither
+    // may a press that predates tracking being enabled.
+    const hadPress = (this.mouseButtonsPressed & (1 << button)) !== 0;
     this.mouseButtonsPressed &= ~(1 << button);
+    if (!hadPress) return;
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
@@ -862,6 +900,8 @@ export class InputHandler {
   private handleMouseMove(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    // Shift-bypassed drags are host selections; do not report their motion.
+    if (event.shiftKey) return;
 
     // Check if button motion mode or any-event tracking is enabled
     // Mode 1002 = button motion, Mode 1003 = any motion
@@ -893,14 +933,27 @@ export class InputHandler {
   private handleWheel(event: WheelEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    // Shift bypasses reporting: the host owns the wheel again.
+    if (event.shiftKey) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
-    // Wheel events: button 64 = scroll up, button 65 = scroll down
+    // Wheel events: button 64 = scroll up, button 65 = scroll down.
+    // One report per notch: line mode counts lines directly, page mode is a
+    // full page, pixel mode uses the same ~33px-per-notch divisor as the
+    // host's alternate-screen fallback — capped at 5 to match.
+    const notches =
+      event.deltaMode === 1 // WheelEvent.DOM_DELTA_LINE
+        ? Math.min(Math.max(Math.abs(Math.round(event.deltaY)), 1), 5)
+        : event.deltaMode === 2 // WheelEvent.DOM_DELTA_PAGE
+          ? 5
+          : Math.min(Math.max(Math.round(Math.abs(event.deltaY) / 33), 1), 5);
     const button = event.deltaY < 0 ? 64 : 65;
 
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    for (let i = 0; i < notches; i++) {
+      this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    }
 
     // Prevent default scrolling when mouse tracking is active
     event.preventDefault();
