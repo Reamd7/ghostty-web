@@ -3306,3 +3306,53 @@ describe('wheel arbitration with mouse tracking', () => {
     term.dispose();
   });
 });
+
+describe('focus reporting (mode 1004)', () => {
+  let container: HTMLElement | null = null;
+
+  beforeEach(() => {
+    if (typeof document !== 'undefined') {
+      container = document.createElement('div');
+      document.body.appendChild(container);
+    }
+  });
+
+  afterEach(() => {
+    if (container && container.parentNode) {
+      container.parentNode.removeChild(container);
+      container = null;
+    }
+  });
+
+  test('reports \\e[I / \\e[O only while mode 1004 is enabled', async () => {
+    if (!container) return;
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+
+    const data: string[] = [];
+    term.onData((d) => data.push(d));
+
+    // Without mode 1004 the app must not receive focus notifications.
+    container.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(data).toEqual([]);
+    container.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    expect(data).toEqual([]);
+
+    // Focus gained while reporting is enabled -> \e[I once.
+    term.write('\x1b[?1004h');
+    container.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(data).toEqual(['\x1b[I']);
+
+    // Internal focus moves stay silent (relatedTarget still inside).
+    const inner = document.createElement('div');
+    container.appendChild(inner);
+    container.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: inner }));
+    expect(data).toEqual(['\x1b[I']);
+
+    // Focus lost to outside -> \e[O once.
+    container.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    expect(data).toEqual(['\x1b[I', '\x1b[O']);
+
+    term.dispose();
+  });
+});

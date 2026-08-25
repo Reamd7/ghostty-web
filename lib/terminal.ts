@@ -120,6 +120,8 @@ export class Terminal implements ITerminalCore {
   private scrollAnimationStartY?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
+  // Focus reporting (DEC mode 1004): last state we reported to the app.
+  private focusReported = false;
   private lastCursorY: number = 0; // Track cursor position for onCursorMove
 
   // Scrollbar interaction state
@@ -522,6 +524,25 @@ export class Terminal implements ITerminalCore {
       // Use capture phase to ensure we get the event before browser scrolling
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
 
+      // Focus reporting (DEC mode 1004): xterm.js-compatible \e[I / \e[O so
+      // applications (vim, lazygit, ...) can pause/resume on focus changes.
+      // focusin/focusout bubble per focused descendant, so gate on the last
+      // state we reported and ignore internal focus moves.
+      parent.addEventListener('focusin', () => {
+        if (this.focusReported) return;
+        this.focusReported = true;
+        if (this.wasmTerm?.hasFocusEvents() && !this.options.disableStdin) {
+          this.dataEmitter.fire('\x1b[I');
+        }
+      });
+      parent.addEventListener('focusout', (e: FocusEvent) => {
+        if (!this.focusReported) return;
+        if (e.relatedTarget instanceof Node && parent.contains(e.relatedTarget)) return;
+        this.focusReported = false;
+        if (this.wasmTerm?.hasFocusEvents() && !this.options.disableStdin) {
+          this.dataEmitter.fire('\x1b[O');
+        }
+      });
       // Render initial blank screen (force full redraw)
       this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
 
