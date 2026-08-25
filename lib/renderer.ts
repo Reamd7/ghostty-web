@@ -223,17 +223,30 @@ export class CanvasRenderer {
     const widthMetrics = ctx.measureText('M');
     const width = Math.ceil(widthMetrics.width);
 
-    // Measure height using ascent + descent with padding for glyph overflow
-    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
-    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
+    // Line-box metrics must come from the FONT-wide bounding box, not the
+    // 'M' glyph's actual bounding box: CJK and box-drawing glyphs are much
+    // taller than 'M', and baselines derived from 'M' clip their tops at
+    // the canvas edge (row 0 renders with its upper pixels cut off).
+    const fontAscent =
+      widthMetrics.fontBoundingBoxAscent ||
+      widthMetrics.actualBoundingBoxAscent ||
+      this.fontSize * 0.8;
+    const fontDescent =
+      widthMetrics.fontBoundingBoxDescent ||
+      widthMetrics.actualBoundingBoxDescent ||
+      this.fontSize * 0.2;
 
     if (this.lineHeightMultiplier !== undefined) {
-      // Explicit line height: scale the natural box, centered on the baseline
-      // derived from the scaled ascent so glyphs stay optically centered.
-      const height = Math.ceil((ascent + descent) * this.lineHeightMultiplier);
-      const baseline = Math.ceil(ascent * this.lineHeightMultiplier);
+      // Explicit line height: scale the font box, baseline follows the
+      // scaled font ascent so no glyph in the font can cross the cell top.
+      const height = Math.ceil((fontAscent + fontDescent) * this.lineHeightMultiplier);
+      const baseline = Math.ceil(fontAscent * this.lineHeightMultiplier);
       return { width, height, baseline };
     }
+
+    // Legacy default: 'M'-glyph box + 2px padding (unchanged behavior).
+    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
+    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
 
     // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
     // and anti-aliasing pixels
