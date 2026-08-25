@@ -44,6 +44,18 @@ export interface IScrollbackProvider {
 export interface RendererOptions {
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
+  /**
+   * CSS font weight for regular text (e.g. 300 for the crisp light look
+   * terminals like Orca use). Default: normal (400, current behavior).
+   */
+  fontWeight?: number;
+  /** CSS font weight for SGR-bold text. Default: bold (700, current behavior). */
+  fontWeightBold?: number;
+  /**
+   * Cell height multiplier applied to (ascent + descent). Overrides the
+   * legacy "+2px" padding when set (e.g. 1.2 for Orca-like breathing room).
+   */
+  lineHeight?: number;
   cursorStyle?: 'block' | 'underline' | 'bar'; // Default: 'block'
   cursorBlink?: boolean; // Default: false
   theme?: ITheme;
@@ -96,6 +108,9 @@ export class CanvasRenderer {
   private ctx: CanvasRenderingContext2D;
   private fontSize: number;
   private fontFamily: string;
+  private fontWeight?: number;
+  private fontWeightBold?: number;
+  private lineHeightMultiplier?: number;
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
   private theme: Required<ITheme>;
@@ -149,11 +164,16 @@ export class CanvasRenderer {
     // Apply options
     this.fontSize = options.fontSize ?? 15;
     this.fontFamily = options.fontFamily ?? 'monospace';
+    this.fontWeight = options.fontWeight;
+    this.fontWeightBold = options.fontWeightBold;
+    this.lineHeightMultiplier =
+      typeof options.lineHeight === 'number' && options.lineHeight > 0
+        ? options.lineHeight
+        : undefined;
     this.cursorStyle = options.cursorStyle ?? 'block';
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
-
     // Build color palette (16 ANSI colors)
     this.palette = [
       this.theme.black,
@@ -192,8 +212,12 @@ export class CanvasRenderer {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d')!;
 
-    // Set font (use actual pixel size for accurate measurement)
-    ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+    // Set font (use actual pixel size and the regular weight for accurate
+    // measurement — cell width must be measured at the weight we draw with).
+    ctx.font =
+      this.fontWeight !== undefined
+        ? `${this.fontWeight} ${this.fontSize}px ${this.fontFamily}`
+        : `${this.fontSize}px ${this.fontFamily}`;
 
     // Measure width using 'M' (typically widest character)
     const widthMetrics = ctx.measureText('M');
@@ -202,6 +226,14 @@ export class CanvasRenderer {
     // Measure height using ascent + descent with padding for glyph overflow
     const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
     const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
+
+    if (this.lineHeightMultiplier !== undefined) {
+      // Explicit line height: scale the natural box, centered on the baseline
+      // derived from the scaled ascent so glyphs stay optically centered.
+      const height = Math.ceil((ascent + descent) * this.lineHeightMultiplier);
+      const baseline = Math.ceil(ascent * this.lineHeightMultiplier);
+      return { width, height, baseline };
+    }
 
     // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
     // and anti-aliasing pixels
@@ -602,12 +634,6 @@ export class CanvasRenderer {
     // Check if this cell is selected
     const isSelected = this.isInSelection(x, y);
 
-    // Set text style
-    let fontStyle = '';
-    if (cell.flags & CellFlags.ITALIC) fontStyle += 'italic ';
-    if (cell.flags & CellFlags.BOLD) fontStyle += 'bold ';
-    this.ctx.font = `${fontStyle}${this.fontSize}px ${this.fontFamily}`;
-
     // Set text color - use override, selection foreground, or normal color
     if (colorOverride) {
       this.ctx.fillStyle = colorOverride;
@@ -634,6 +660,13 @@ export class CanvasRenderer {
       this.ctx.globalAlpha = 0.5;
     }
 
+    // Set text style; weights follow the configured options and fall back to
+    // the legacy 'bold' keyword / default weight when unset.
+    let fontStyle = '';
+    if (cell.flags & CellFlags.ITALIC) fontStyle += 'italic ';
+    if (cell.flags & CellFlags.BOLD) fontStyle += `${this.fontWeightBold ?? 'bold'} `;
+    else if (this.fontWeight !== undefined) fontStyle += `${this.fontWeight} `;
+    this.ctx.font = `${fontStyle}${this.fontSize}px ${this.fontFamily}`;
     // Draw text
     const textX = cellX;
     const textY = cellY + this.metrics.baseline;

@@ -13,6 +13,12 @@ export interface ITerminalOptions {
   scrollback?: number; // Default: 10000
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
+  /** CSS font weight for regular text (e.g. 300). Default: unset (400). */
+  fontWeight?: number;
+  /** CSS font weight for SGR-bold text (e.g. 500). Default: unset (bold/700). */
+  fontWeightBold?: number;
+  /** Cell height multiplier over ascent+descent (e.g. 1.2). Default: legacy +2px. */
+  lineHeight?: number;
   allowTransparency?: boolean;
 
   // Phase 1 additions
