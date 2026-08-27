@@ -1,14 +1,15 @@
 diff --git a/.gitignore b/.gitignore
-index e451b171a..89c623d8b 100644
+index 74f3f85..4c7d178 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -23,3 +23,4 @@ glad.zip
- /ghostty.qcow2
+@@ -26,3 +26,5 @@ glad.zip
  
  vgcore.*
+ 
++
 +node_modules/
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
-index 4f8fef88e..ca9fb1d4d 100644
+index 4f8fef8..ca9fb1d 100644
 --- a/include/ghostty/vt.h
 +++ b/include/ghostty/vt.h
 @@ -28,6 +28,7 @@
@@ -29,7 +30,7 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..c467102c3
+index 0000000..c467102
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
 @@ -0,0 +1,285 @@
@@ -319,10 +320,10 @@ index 000000000..c467102c3
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 03a883e20..1336676d7 100644
+index 4266606..a238a6a 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -140,6 +140,45 @@ comptime {
+@@ -143,6 +143,45 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -368,8 +369,42 @@ index 03a883e20..1336676d7 100644
  
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index ea8ca14..75a7248 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -871,15 +871,24 @@ pub fn cursorDownScroll(self: *Screen) !void {
+         // Our new row is always dirty
+         self.cursorMarkDirty();
+ 
+-        // Clear the new row so it gets our bg color. We only do this
+-        // if we have a bg color at all.
+-        if (self.cursor.style.bg_color != .none) {
++        // Always clear the new row's cells. When pages.grow() extends an
++        // existing page, the new row's cell memory may contain stale data
++        // from previously erased rows. Without clearing, these stale cells
++        // become visible when the row isn't fully overwritten, such as after
++        // bare CRLF output with the default cursor style.
++        {
+             const page: *Page = &self.cursor.page_pin.node.data;
++            const row = self.cursor.page_row;
++            const cells_offset = row.cells;
++            const dirty = row.dirty;
+             self.clearCells(
+                 page,
+-                self.cursor.page_row,
+-                page.getCells(self.cursor.page_row),
++                row,
++                page.getCells(row),
+             );
++            // Reset row-level metadata that clearCells does not touch while
++            // preserving the backing cell offset and dirty state.
++            row.* = .{ .cells = cells_offset, .dirty = dirty };
+         }
+     }
+ 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..d0ee49c1b 100644
+index bc92597..d0ee49c 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -437,10 +472,10 @@ index bc92597f5..d0ee49c1b 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..73ae2e6fa
+index 0000000..11c8705
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1123 @@
+@@ -0,0 +1,1116 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -557,7 +592,7 @@ index 000000000..73ae2e6fa
 +            .insert_lines => self.terminal.insertLines(value),
 +            .insert_blanks => self.terminal.insertBlanks(value),
 +            .delete_lines => self.terminal.deleteLines(value),
-+            .scroll_up => self.terminal.scrollUp(value),
++            .scroll_up => try self.terminal.scrollUp(value),
 +            .scroll_down => self.terminal.scrollDown(value),
 +            .horizontal_tab => try self.horizontalTab(value),
 +            .horizontal_tab_back => try self.horizontalTabBack(value),
@@ -582,7 +617,7 @@ index 000000000..73ae2e6fa
 +                }
 +            },
 +            .save_cursor => self.terminal.saveCursor(),
-+            .restore_cursor => try self.terminal.restoreCursor(),
++            .restore_cursor => self.terminal.restoreCursor(),
 +            .invoke_charset => self.terminal.invokeCharset(value.bank, value.charset, value.locking),
 +            .configure_charset => self.terminal.configureCharset(value.slot, value.charset),
 +            .set_attribute => switch (value) {
@@ -610,14 +645,7 @@ index 000000000..73ae2e6fa
 +            .full_reset => self.terminal.fullReset(),
 +            .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
 +            .end_hyperlink => self.terminal.screens.active.endHyperlink(),
-+            .prompt_start => {
-+                self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt;
-+                self.terminal.flags.shell_redraws_prompt = value.redraw;
-+            },
-+            .prompt_continuation => self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt_continuation,
-+            .prompt_end => self.terminal.markSemanticPrompt(.input),
-+            .end_of_input => self.terminal.markSemanticPrompt(.command),
-+            .end_of_command => self.terminal.screens.active.cursor.page_row.semantic_prompt = .input,
++            .semantic_prompt => try self.terminal.semanticPrompt(value),
 +            .mouse_shape => self.terminal.mouse_shape = value,
 +            .color_operation => try self.colorOperation(value.op, &value.requests),
 +            .kitty_color_report => try self.kittyColorOperation(value),
@@ -700,7 +728,7 @@ index 000000000..73ae2e6fa
 +    inline fn horizontalTab(self: *ResponseHandler, count: u16) !void {
 +        for (0..count) |_| {
 +            const x = self.terminal.screens.active.cursor.x;
-+            try self.terminal.horizontalTab();
++            self.terminal.horizontalTab();
 +            if (x == self.terminal.screens.active.cursor.x) break;
 +        }
 +    }
@@ -708,7 +736,7 @@ index 000000000..73ae2e6fa
 +    inline fn horizontalTabBack(self: *ResponseHandler, count: u16) !void {
 +        for (0..count) |_| {
 +            const x = self.terminal.screens.active.cursor.x;
-+            try self.terminal.horizontalTabBack();
++            self.terminal.horizontalTabBack();
 +            if (x == self.terminal.screens.active.cursor.x) break;
 +        }
 +    }
@@ -728,7 +756,7 @@ index 000000000..73ae2e6fa
 +            .save_cursor => if (enabled) {
 +                self.terminal.saveCursor();
 +            } else {
-+                try self.terminal.restoreCursor();
++                self.terminal.restoreCursor();
 +            },
 +            .enable_mode_3 => {},
 +            .@"132_column" => try self.terminal.deccolm(
@@ -1564,37 +1592,30 @@ index 000000000..73ae2e6fa
 +    try std.testing.expectEqual(@as(u32, 'l'), cells[3].codepoint);
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
-diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index ba2af2473..b8be8f273 100644
---- a/src/terminal/Screen.zig
-+++ b/src/terminal/Screen.zig
-@@ -851,10 +851,19 @@ pub fn cursorDownScroll(self: *Screen) !void {
--        // Clear the new row so it gets our bg color. We only do this
--        // if we have a bg color at all.
--        if (self.cursor.style.bg_color != .none) {
-+        // Always clear the new row's cells. When pages.grow() extends an
-+        // existing page, the new row's cell memory may contain stale data
-+        // from previously erased rows. Without clearing, these stale cells
-+        // become visible when the row isn't fully overwritten, such as after
-+        // bare CRLF output with the default cursor style.
-+        {
-             const page: *Page = &page_pin.node.data;
-+            const row = self.cursor.page_row;
-+            const cells_offset = row.cells;
-+            const dirty = row.dirty;
-             self.clearCells(
-                 page,
--                self.cursor.page_row,
--                page.getCells(self.cursor.page_row),
-+                row,
-+                page.getCells(row),
-             );
-+            // Reset row-level metadata that clearCells does not touch while
-+            // preserving the backing cell offset and dirty state.
-+            row.* = .{ .cells = cells_offset, .dirty = dirty };
-         }
+diff --git a/src/terminal/osc/parsers/semantic_prompt.zig b/src/terminal/osc/parsers/semantic_prompt.zig
+index d3a1175..6b3643f 100644
+--- a/src/terminal/osc/parsers/semantic_prompt.zig
++++ b/src/terminal/osc/parsers/semantic_prompt.zig
+@@ -28,6 +28,17 @@ pub const Command = struct {
+         end_command, // 'D'
+     };
+ 
++    /// C ABI representation. Options are omitted: they are slices that
++    /// cannot cross the C boundary, and they are always consumed
++    /// internally before any C conversion happens.
++    pub const C = extern struct {
++        action: u32,
++    };
++
++    pub fn cval(self: Command) C {
++        return .{ .action = @intFromEnum(self.action) };
++    }
++
+     pub fn init(action: Action) Command {
+         return .{
+             .action = action,
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index b6430ea34..10e0ef79d 100644
+index 2332866..dcfa15f 100644
 --- a/src/terminal/render.zig
 +++ b/src/terminal/render.zig
 @@ -322,13 +322,14 @@ pub const RenderState = struct {
