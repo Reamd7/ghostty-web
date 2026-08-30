@@ -1,6 +1,6 @@
 # 调研：WebGL 渲染器可行性（ghostty-web fork）
 
-> 状态：调研完成，未立项。立项条件见 §9 决策门。
+> 状态：调研完成，未立项。立项条件见 §8 决策门。
 > 前置阅读：主仓 `PLAN-terminal-render-perf.md`（R1-R3 渲染循环重构是本方案的地基）。
 
 ## 1. 动机与边界
@@ -10,15 +10,16 @@ Canvas 2D 渲染的硬天花板是 `fillText`：每个非空 cell 一次调用�
 cell 解析）在 R1 完成后仅 ~100μs。继续优化搬运无意义，提升只能来自绘制方式。
 
 WebGL glyph atlas 路线 = 字形预光栅化进纹理，每帧只做顶点批量提交 + 一次
-`drawArrays`。xterm.js 的 `@xterm/addon-webgl` 证明了该路线在浏览器终端上
-的数量级收益。
+`drawArrays`。
 
 **先回答两个架构问题（调研结论）**：
 
-- *把渲染业务全搬 wasm？* 不做。Canvas 2D 绘制 API 只在 JS 侧，wasm 化后
-  每条绘制指令反而要 wasm→JS 反向跨界，帧时间更差。wasm 深化只在
-  "wasm 直接生成顶点 buffer"（WebGL 场景）有意义，而 JS 层生成顶点同样
-  便宜（R1 快照已在 JS），不值得为此把渲染器写进 Zig。
+- *把渲染业务全搬 wasm？* 对 Canvas 2D 不做——绘制 API 只在 JS 侧，wasm
+  化后每条绘制指令要 wasm→JS 反向跨界，帧时间更差。**边界修正（见 §2.5
+  beamterm）**：在 WebGL 下"渲染器整体 wasm 化"没有此障碍（wgpu 直接驱动
+  GPU），是真实可行的路线，但代价是引入 Rust 工具链；本 fork 已有 TS 渲染
+  契约与测试，不走此路。wasm 侧生成顶点 buffer 的收益（省一次快照拷贝）
+  在 R1 后仅 ~30KB/帧，不值得。
 - *直接用 @xterm/addon-webgl？* 不可能，见 §3。
 
 ## 2. 业界参照：xterm.js addon-webgl 架构
@@ -59,6 +60,40 @@ BufferLine 遍历（JS，读 TypedArray 位域）
 
 未命中 atlas 的字形光栅化是唯一的同步慢路径，靠缓存命中率高（ASCII 预热 +
 工作集局部性）保持在帧外。
+
+## 2.5 业界采用情况（2026-08 核实）
+
+**大规模部署的 web 终端 WebGL 方案只有一个：xterm.js + addon-webgl。**
+
+- **VS Code**（桌面 + vscode.dev，世界上部署量最大的 web 终端）：微软官方
+  推进，2021 年起 WebGL 为默认渲染器（microsoft/vscode#106202，Tyriar
+  主导，已关闭落地）。设置收敛为
+  `terminal.integrated.gpuAcceleration: 'auto'|'on'|'off'`；`auto` =
+  webgl 优先，启动失败或运行时 FPS 低于预期时自动降级 canvas → dom 并
+  缓存决策。canvas 渲染器保留仅因个别设备（如旧 iPad）无 WebGL2。
+- **xterm.js 生态**（Hyper、Wave Terminal——后者维护自己的 xterm.js fork、
+  ttyd/wetty/electerm/Tabby 等 web/SSH 终端）：全部 xterm.js 系，WebGL
+  与否取决于是否挂 addon-webgl；无第二套成熟 WebGL 实现在流通。
+
+**非 xterm 系的独立实现存在，但小众/新兴**：
+
+- **beamterm**（kofany/beamterm，crate `beamterm-renderer` + npm
+  `@beamterm/renderer`）：Rust + wgpu 编译 WASM + WebGL2 instanced
+  rendering，宣称亚毫秒渲染；cell 批更新单次 GPU 上传；只做 cell-grid
+  渲染不做 VT 解析（与 ghostty VT 在架构上互补）。它证明渲染器整体
+  wasm 化 + wgpu 这条路真实可行（修正 §1 结论边界），但引入 Rust/wgpu
+  工具链，本 fork 不采用。
+- ferroterm、soul-terminal 等：实验规模。
+
+**原生终端全员 GPU 渲染**（非 web，但是路线共识的证据）：Alacritty
+（OpenGL，2017 年即以 GPU 渲染立身）、kitty（OpenGL）、WezTerm
+（Metal/GL）、Ghostty 本体（AppKit+Metal / GTK+GL）。终端渲染走 GPU
+字形图集是全行业收敛点，web 侧 addon-webgl 即该共识的 WebGL 翻译，
+VS Code 数百万日活验证了它的正确性边界与降级策略。
+
+对本 fork 的意义：走 WebGL 不是激进选择，而是补齐行业默认路线；
+`auto` 降级链（webgl → canvas 回退 + FPS 探测缓存）应作为本方案验收
+标准的一部分直接采纳。
 
 ## 3. 为什么 `@xterm/addon-webgl` 不能直接用于 ghostty-web
 
@@ -167,7 +202,10 @@ trace 必须显示 fillText/raster 为主要成本才立项；若瓶颈在脚本
 ## 9. 结论
 
 - WebGL 是终端渲染的终局方案，但**它是决策门的产物，不是起点**。
+- 业界核实（§2.5）：大规模 web 终端 WebGL 方案仅 xterm.js + addon-webgl
+  一套（VS Code 默认）；渲染器 wasm 化有 beamterm 先例但不适合本 fork；
+  原生终端全员 GPU —— 走 WebGL 是补齐行业默认路线。
 - 实现走 fork 自有 renderer 契约（§4），复用 addon-webgl 的 atlas 设计
-  知识（§2），不复用其代码。
+  知识（§2），不复用其代码；`auto` 降级链纳入验收标准。
 - 与 R1 的关系：R1 的每帧单快照 = WebGL 顶点生成器的输入接口，
   两阶段工作衔接，无返工。
