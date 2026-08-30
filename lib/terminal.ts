@@ -702,6 +702,15 @@ export class Terminal implements ITerminalCore {
       return; // No change
     }
 
+    // Degenerate grids corrupt the WASM VT: the parser writes out of bounds
+    // on 1-row/1-col rings (trapped deep inside ghostty_terminal_write), and
+    // resize(0, 0) traps in ghostty_terminal_resize itself. Nothing sane
+    // renders below 2x2, so refuse instead of corrupting the terminal.
+    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 2 || rows < 2) {
+      throw new Error(`Terminal.resize refused degenerate grid ${cols}x${rows} (minimum 2x2)`);
+    }
+
+
     // Cancel render loop before resize to prevent accessing detached TypedArray
     // views while WASM reallocates buffers. We restart it after resize completes.
     // This avoids the background-tab regression of using an isResizing flag

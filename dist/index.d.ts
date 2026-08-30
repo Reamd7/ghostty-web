@@ -297,6 +297,13 @@ export declare class GhosttyTerminal {
     get cols(): number;
     get rows(): number;
     write(data: string | Uint8Array): void;
+    /**
+     * Allocate a byte array or throw. The WASM allocator returns null (0) on
+     * failure; treating that as a pointer writes over the start of WASM memory
+     * (heap metadata) and corrupts the terminal state, which later surfaces as
+     * impossible-to-debug out-of-bounds traps deep inside the VT parser.
+     */
+    private allocChecked;
     resize(cols: number, rows: number): void;
     free(): void;
     /**
@@ -1279,6 +1286,9 @@ export declare class KeyEncoder {
     setOption(option: KeyEncoderOption, value: boolean | number): void;
     setKittyFlags(flags: KittyKeyFlags): void;
     encode(event: KeyEvent): Uint8Array;
+    /** allocU8Array variant for this class; throws on allocation failure. */
+    private allocChecked;
+    private allocOpaqueChecked;
     dispose(): void;
 }
 

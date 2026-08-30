@@ -185,54 +185,69 @@ export class KeyEncoder {
   }
 
   encode(event: KeyEvent): Uint8Array {
-    const eventPtrPtr = this.exports.ghostty_wasm_alloc_opaque();
-    const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
-    if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
+    const eventPtrPtr = this.allocOpaqueChecked();
+    let eventPtr = 0;
+    try {
+      const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
+      if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
 
-    const view = new DataView(this.exports.memory.buffer);
-    const eventPtr = view.getUint32(eventPtrPtr, true);
-    this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
+      eventPtr = new DataView(this.exports.memory.buffer).getUint32(eventPtrPtr, true);
 
-    this.exports.ghostty_key_event_set_action(eventPtr, event.action);
-    this.exports.ghostty_key_event_set_key(eventPtr, event.key);
-    this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
+      this.exports.ghostty_key_event_set_action(eventPtr, event.action);
+      this.exports.ghostty_key_event_set_key(eventPtr, event.key);
+      this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
 
-    if (event.utf8) {
-      const encoder = new TextEncoder();
-      const utf8Bytes = encoder.encode(event.utf8);
-      const utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Bytes.length);
-      new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
-      this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
-      this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length);
+      if (event.utf8) {
+        const utf8Bytes = new TextEncoder().encode(event.utf8);
+        const utf8Ptr = this.allocChecked(utf8Bytes.length);
+        try {
+          new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
+          this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
+        } finally {
+          this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length);
+        }
+      }
+
+      const bufferSize = 32;
+      const bufPtr = this.allocChecked(bufferSize);
+      const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+      if (!writtenPtr) {
+        this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
+        throw new Error('ghostty wasm allocation failed (out of memory)');
+      }
+
+      try {
+        const encodeResult = this.exports.ghostty_key_encoder_encode(
+          this.encoder,
+          eventPtr,
+          bufPtr,
+          bufferSize,
+          writtenPtr
+        );
+        if (encodeResult !== 0) throw new Error(`Failed to encode key: ${encodeResult}`);
+        const bytesWritten = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
+        return new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
+      } finally {
+        this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
+        this.exports.ghostty_wasm_free_usize(writtenPtr);
+      }
+    } finally {
+      if (eventPtr) this.exports.ghostty_key_event_free(eventPtr);
+      this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
     }
+  }
 
-    const bufferSize = 32;
-    const bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
-    const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+  /** allocU8Array variant for this class; throws on allocation failure. */
+  private allocChecked(len: number): number {
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(len);
+    if (!ptr) throw new Error(`ghostty wasm allocation of ${len} bytes failed (out of memory)`);
+    return ptr;
+  }
 
-    const encodeResult = this.exports.ghostty_key_encoder_encode(
-      this.encoder,
-      eventPtr,
-      bufPtr,
-      bufferSize,
-      writtenPtr
-    );
-
-    if (encodeResult !== 0) {
-      this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
-      this.exports.ghostty_wasm_free_usize(writtenPtr);
-      this.exports.ghostty_key_event_free(eventPtr);
-      throw new Error(`Failed to encode key: ${encodeResult}`);
-    }
-
-    const bytesWritten = view.getUint32(writtenPtr, true);
-    const encoded = new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
-
-    this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
-    this.exports.ghostty_wasm_free_usize(writtenPtr);
-    this.exports.ghostty_key_event_free(eventPtr);
-
-    return encoded;
+  private allocOpaqueChecked(): number {
+    const ptr = this.exports.ghostty_wasm_alloc_opaque();
+    if (!ptr) throw new Error('ghostty wasm opaque allocation failed (out of memory)');
+    return ptr;
   }
 
   dispose(): void {
@@ -341,10 +356,25 @@ export class GhosttyTerminal {
 
   write(data: string | Uint8Array): void {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const ptr = this.exports.ghostty_wasm_alloc_u8_array(bytes.length);
-    new Uint8Array(this.memory.buffer).set(bytes, ptr);
-    this.exports.ghostty_terminal_write(this.handle, ptr, bytes.length);
-    this.exports.ghostty_wasm_free_u8_array(ptr, bytes.length);
+    const ptr = this.allocChecked(bytes.length);
+    try {
+      new Uint8Array(this.memory.buffer).set(bytes, ptr);
+      this.exports.ghostty_terminal_write(this.handle, ptr, bytes.length);
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, bytes.length);
+    }
+  }
+
+  /**
+   * Allocate a byte array or throw. The WASM allocator returns null (0) on
+   * failure; treating that as a pointer writes over the start of WASM memory
+   * (heap metadata) and corrupts the terminal state, which later surfaces as
+   * impossible-to-debug out-of-bounds traps deep inside the VT parser.
+   */
+  private allocChecked(len: number): number {
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(len);
+    if (!ptr) throw new Error(`ghostty wasm allocation of ${len} bytes failed (out of memory)`);
+    return ptr;
   }
 
   resize(cols: number, rows: number): void {
@@ -360,6 +390,7 @@ export class GhosttyTerminal {
     if (this.viewportBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
       this.viewportBufferPtr = 0;
+      this.viewportBufferSize = 0;
     }
     this.exports.ghostty_terminal_free(this.handle);
   }
@@ -451,8 +482,12 @@ export class GhosttyTerminal {
     if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
       if (this.viewportBufferPtr) {
         this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
+        this.viewportBufferPtr = 0;
+        this.viewportBufferSize = 0;
       }
-      this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+      const fresh = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+      if (!fresh) throw new Error(`ghostty wasm viewport allocation of ${neededSize} bytes failed`);
+      this.viewportBufferPtr = fresh;
       this.viewportBufferSize = neededSize;
     }
 
@@ -556,8 +591,12 @@ export class GhosttyTerminal {
     if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
       if (this.viewportBufferPtr) {
         this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
+        this.viewportBufferPtr = 0;
+        this.viewportBufferSize = 0;
       }
-      this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+      const fresh = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+      if (!fresh) throw new Error(`ghostty wasm scrollback allocation of ${neededSize} bytes failed`);
+      this.viewportBufferPtr = fresh;
       this.viewportBufferSize = neededSize;
     }
 
