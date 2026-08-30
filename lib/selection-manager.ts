@@ -448,7 +448,8 @@ export class SelectionManager {
           return;
         }
 
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const down = this.localPoint(e, canvas);
+        const cell = this.pixelToCell(down.x, down.y);
 
         // Always clear previous selection on new click
         const hadSelection = this.hasSelection();
@@ -461,8 +462,8 @@ export class SelectionManager {
         this.selectionStart = { col: cell.col, absoluteRow };
         this.selectionEnd = { col: cell.col, absoluteRow };
         this.isSelecting = true;
-        this.mouseDownX = e.offsetX;
-        this.mouseDownY = e.offsetY;
+        this.mouseDownX = down.x;
+        this.mouseDownY = down.y;
         this.dragThresholdMet = false;
       }
     });
@@ -470,10 +471,11 @@ export class SelectionManager {
     // Mouse move on canvas - update selection
     canvas.addEventListener('mousemove', (e: MouseEvent) => {
       if (this.isSelecting) {
+        const point = this.localPoint(e, canvas);
         // Check if drag threshold has been met
         if (!this.dragThresholdMet) {
-          const dx = e.offsetX - this.mouseDownX;
-          const dy = e.offsetY - this.mouseDownY;
+          const dx = point.x - this.mouseDownX;
+          const dy = point.y - this.mouseDownY;
           // Use 50% of cell width as threshold to scale with font size
           const threshold = this.renderer.getMetrics().width * 0.5;
           if (dx * dx + dy * dy < threshold * threshold) {
@@ -485,13 +487,13 @@ export class SelectionManager {
         // Mark current selection rows as dirty before updating
         this.markCurrentSelectionDirty();
 
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const cell = this.pixelToCell(point.x, point.y);
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
         this.selectionEnd = { col: cell.col, absoluteRow };
         this.requestRender();
 
         // Check if near edges for auto-scroll
-        this.updateAutoScroll(e.offsetY, canvas.clientHeight);
+        this.updateAutoScroll(point.y, canvas.clientHeight);
       }
     });
 
@@ -535,9 +537,13 @@ export class SelectionManager {
         const clampedX = Math.max(rect.left, Math.min(e.clientX, rect.right));
         const clampedY = Math.max(rect.top, Math.min(e.clientY, rect.bottom));
 
-        // Convert to canvas-relative coordinates
-        const offsetX = clampedX - rect.left;
-        const offsetY = clampedY - rect.top;
+        // Convert to canvas-local (natural, pre-transform) coordinates — the
+        // canvas may carry a CSS transform, and pixelToCell divides by
+        // natural-space metrics.
+        const scaleX = rect.width > 0 && canvas.offsetWidth > 0 ? canvas.offsetWidth / rect.width : 1;
+        const scaleY = rect.height > 0 && canvas.offsetHeight > 0 ? canvas.offsetHeight / rect.height : 1;
+        const offsetX = (clampedX - rect.left) * scaleX;
+        const offsetY = (clampedY - rect.top) * scaleY;
 
         // Only update if mouse is outside the canvas
         if (
@@ -607,7 +613,8 @@ export class SelectionManager {
       if (this.wasmTerm.hasMouseTracking() && !e.shiftKey) return;
       // event.detail: 1 = single, 2 = double, 3 = triple click
       if (e.detail === 2) {
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const point = this.localPoint(e, canvas);
+        const cell = this.pixelToCell(point.x, point.y);
         const word = this.getWordAtCell(cell.col, cell.row);
 
         if (word) {
@@ -624,7 +631,8 @@ export class SelectionManager {
         }
       } else if (e.detail >= 3) {
         // Triple-click (or more) - select line content (like native Ghostty)
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const point = this.localPoint(e, canvas);
+        const cell = this.pixelToCell(point.x, point.y);
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
 
         // Find actual line length (exclude trailing empty cells)
@@ -850,6 +858,22 @@ export class SelectionManager {
       this.autoScrollInterval = null;
     }
     this.autoScrollDirection = 0;
+  }
+
+  /**
+   * Map a mouse event to canvas-local (natural, pre-transform) coordinates.
+   * The canvas can carry a CSS transform (view zoom / driver-follow scaling),
+   * so raw client offsets are converted through the live rect; computed-style
+   * dimensions keep the fraction precision offsetWidth would round away.
+   */
+  private localPoint(e: MouseEvent, canvas: HTMLCanvasElement): { x: number; y: number } {
+    const rect = canvas.getBoundingClientRect();
+    const style = getComputedStyle(canvas);
+    const naturalWidth = Number.parseFloat(style.width) || canvas.offsetWidth;
+    const naturalHeight = Number.parseFloat(style.height) || canvas.offsetHeight;
+    const scaleX = rect.width > 0 && naturalWidth > 0 ? naturalWidth / rect.width : 1;
+    const scaleY = rect.height > 0 && naturalHeight > 0 ? naturalHeight / rect.height : 1;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
   }
 
   /**

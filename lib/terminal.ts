@@ -444,10 +444,7 @@ export class Terminal implements ITerminalCore {
       const mouseConfig: MouseTrackingConfig = {
         hasMouseTracking: () => wasmTerm?.hasMouseTracking() ?? false,
         hasSgrMouseMode: () => wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
-        getCellDimensions: () => ({
-          width: renderer.charWidth,
-          height: renderer.charHeight,
-        }),
+        getCellDimensions: () => this.getClientCellDimensions(),
         getCanvasOffset: () => {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
@@ -1363,15 +1360,33 @@ export class Terminal implements ITerminalCore {
   };
 
   /**
-   * Process mouse move for link detection (internal, called by throttled handler)
+   * Cell dimensions in CLIENT (screen) space. The canvas can carry a CSS
+   * transform (view zoom / driver-follow scaling), so cell math that starts
+   * from clientX/clientY must divide by the transform-scaled cell size —
+   * raw renderer metrics are natural-space only. offsetX/offsetY callers
+   * are already local-space and must NOT use this.
    */
+  getClientCellDimensions(): { width: number; height: number } {
+    const renderer = this.renderer;
+    const canvas = this.canvas;
+    if (!renderer || !canvas) return { width: 1, height: 1 };
+    const rect = canvas.getBoundingClientRect();
+    const style = getComputedStyle(canvas);
+    const naturalWidth = Number.parseFloat(style.width) || canvas.offsetWidth;
+    const naturalHeight = Number.parseFloat(style.height) || canvas.offsetHeight;
+    const scaleX = naturalWidth > 0 && rect.width > 0 ? rect.width / naturalWidth : 1;
+    const scaleY = naturalHeight > 0 && rect.height > 0 ? rect.height / naturalHeight : 1;
+    return { width: renderer.charWidth * scaleX, height: renderer.charHeight * scaleY };
+  }
+
   private processMouseMove(e: MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
 
     // Convert mouse coordinates to terminal cell position
     const rect = this.canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
-    const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
+    const dims = this.getClientCellDimensions();
+    const x = Math.floor((e.clientX - rect.left) / dims.width);
+    const y = Math.floor((e.clientY - rect.top) / dims.height);
 
     // Get hyperlink_id directly from the cell at this position
     // Must account for viewportY (scrollback position)
@@ -1542,8 +1557,9 @@ export class Terminal implements ITerminalCore {
 
     // Get click position
     const rect = this.canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
-    const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
+    const dims = this.getClientCellDimensions();
+    const x = Math.floor((e.clientX - rect.left) / dims.width);
+    const y = Math.floor((e.clientY - rect.top) / dims.height);
 
     // Calculate buffer row (same logic as processMouseMove)
     const viewportRow = y;

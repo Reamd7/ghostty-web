@@ -1634,6 +1634,13 @@ export declare class SelectionManager {
      */
     private stopAutoScroll;
     /**
+     * Map a mouse event to canvas-local (natural, pre-transform) coordinates.
+     * The canvas can carry a CSS transform (view zoom / driver-follow scaling),
+     * so raw client offsets are converted through the live rect; computed-style
+     * dimensions keep the fraction precision offsetWidth would round away.
+     */
+    private localPoint;
+    /**
      * Convert pixel coordinates to terminal cell coordinates
      */
     private pixelToCell;
@@ -1948,8 +1955,16 @@ export declare class Terminal implements ITerminalCore {
      */
     private handleMouseMove;
     /**
-     * Process mouse move for link detection (internal, called by throttled handler)
+     * Cell dimensions in CLIENT (screen) space. The canvas can carry a CSS
+     * transform (view zoom / driver-follow scaling), so cell math that starts
+     * from clientX/clientY must divide by the transform-scaled cell size —
+     * raw renderer metrics are natural-space only. offsetX/offsetY callers
+     * are already local-space and must NOT use this.
      */
+    getClientCellDimensions(): {
+        width: number;
+        height: number;
+    };
     private processMouseMove;
     /**
      * Handle mouse leave to clear link hover
