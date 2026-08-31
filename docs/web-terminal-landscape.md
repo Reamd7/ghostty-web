@@ -8,15 +8,15 @@
 
 ## 1. 方案矩阵（全部源码/文档核实）
 
-| 方案 | 渲染技术 | VT core | wasm 跨界 | 成熟度 |
-|---|---|---|---|---|
-| xterm.js + addon-webgl | WebGL1，CPU quad 展开 ~40B/cell | TS | 0（全 JS） | 工业标准（VS Code 默认） |
-| beamterm | WebGL2 instanced 8B/cell，手写绑定 | 无（纯渲染器） | JS 逐 cell serde | 停更 7 个月（另文） |
-| **ferroterm** | Canvas2D + WebGL 双渲染器，持久 buffer + 脏行重传 + 单 instanced call | Rust WASM（from-scratch DEC 状态机） | **1 次/帧，u32 位域快照，只脏行** | 活跃（2026-07 密集开发，2 人，0 星） |
-| soul-terminal (AMAI Labs) | **wgpu 25**（web: WebGL2/WebGPU 自动），glyphon/cosmic-text | 无（widget surface，非终端） | 0（全 Rust） | 停更（2026-02，与 beamterm 同日） |
-| ratzilla (ratatui 官方) | DOM / Canvas2D / WebGL2（backend 作者即 beamterm 作者） | 无（ratatui TUI 框架） | 0（全 Rust） | 1436 星，活跃；非终端模拟器 |
-| FrankenTUI ADR-009 | **wgpu** + patch 流 + WASM 内 Rust 字形光栅化 + trace 确定性门 | 自有 | 0 | **仅 ADR（Proposed），实现未见** |
-| ghostty-web（本 fork） | Canvas 2D fillText | ghostty WASM | 每帧 N 次整屏对象池（R1 计划修） | 自有 |
+| 方案                      | 渲染技术                                                              | VT core                              | wasm 跨界                         | 成熟度                               |
+| ------------------------- | --------------------------------------------------------------------- | ------------------------------------ | --------------------------------- | ------------------------------------ |
+| xterm.js + addon-webgl    | WebGL1，CPU quad 展开 ~40B/cell                                       | TS                                   | 0（全 JS）                        | 工业标准（VS Code 默认）             |
+| beamterm                  | WebGL2 instanced 8B/cell，手写绑定                                    | 无（纯渲染器）                       | JS 逐 cell serde                  | 停更 7 个月（另文）                  |
+| **ferroterm**             | Canvas2D + WebGL 双渲染器，持久 buffer + 脏行重传 + 单 instanced call | Rust WASM（from-scratch DEC 状态机） | **1 次/帧，u32 位域快照，只脏行** | 活跃（2026-07 密集开发，2 人，0 星） |
+| soul-terminal (AMAI Labs) | **wgpu 25**（web: WebGL2/WebGPU 自动），glyphon/cosmic-text           | 无（widget surface，非终端）         | 0（全 Rust）                      | 停更（2026-02，与 beamterm 同日）    |
+| ratzilla (ratatui 官方)   | DOM / Canvas2D / WebGL2（backend 作者即 beamterm 作者）               | 无（ratatui TUI 框架）               | 0（全 Rust）                      | 1436 星，活跃；非终端模拟器          |
+| FrankenTUI ADR-009        | **wgpu** + patch 流 + WASM 内 Rust 字形光栅化 + trace 确定性门        | 自有                                 | 0                                 | **仅 ADR（Proposed），实现未见**     |
+| ghostty-web（本 fork）    | Canvas 2D fillText                                                    | ghostty WASM                         | 每帧 N 次整屏对象池（R1 计划修）  | 自有                                 |
 
 另扫过：basilisk（GPU 终端 + 内置复用，Rust，无 web 证据）、
 levivilet/terminal（JS+WebGPU 实验，2023 停更，1 星）、DomTerm、
@@ -72,15 +72,15 @@ Williams 状态机，from-scratch，非 fork）+ wasm + JS 双渲染器，覆盖
 
 关键数据：
 
-| 项 | 数字 | 来源 |
-|---|---|---|
-| parse（最坏 SGR 流） | 149–248 MB/s | cargo bench，Apple Silicon |
-| 快照 | 0.00–0.02 ms/帧（80×24–200×50） | 同上 |
-| WebGL 增量渲染 | 一行编辑 ≈ 全帧 1/35（200×50） | README，浏览器实测口径 |
-| cursor blink 帧 | < 100μs timer 分辨率 | 同上 |
-| 体积 | ~65KB gzip（双渲染器 + Sixel + reflow + search + links） | vs xterm.js 68KB 核心单仓 |
-| vs xterm.js | 解析 1.4×–4.4× 快 | COMPARISON.md，同浏览器同载荷 |
-| 测试 | 50+ conformance + 双渲染器 headless-Chrome 像素回归 + fuzz | CI: fmt + clippy -D warnings + test |
+| 项                   | 数字                                                       | 来源                                |
+| -------------------- | ---------------------------------------------------------- | ----------------------------------- |
+| parse（最坏 SGR 流） | 149–248 MB/s                                               | cargo bench，Apple Silicon          |
+| 快照                 | 0.00–0.02 ms/帧（80×24–200×50）                            | 同上                                |
+| WebGL 增量渲染       | 一行编辑 ≈ 全帧 1/35（200×50）                             | README，浏览器实测口径              |
+| cursor blink 帧      | < 100μs timer 分辨率                                       | 同上                                |
+| 体积                 | ~65KB gzip（双渲染器 + Sixel + reflow + search + links）   | vs xterm.js 68KB 核心单仓           |
+| vs xterm.js          | 解析 1.4×–4.4× 快                                          | COMPARISON.md，同浏览器同载荷       |
+| 测试                 | 50+ conformance + 双渲染器 headless-Chrome 像素回归 + fuzz | CI: fmt + clippy -D warnings + test |
 
 成熟度：2026-07 单月 56 commits，两人（DatanoiseTV、Sylwester），
 最后 push 2026-08-15。**0 星**——新且无人知，但工程纪律（CI 严格度、
@@ -179,9 +179,66 @@ Williams 状态机，from-scratch，非 fork）+ wasm + JS 双渲染器，覆盖
 
 ### 6.3 分层建议
 
-| 层 | 行动 | 时机 |
-|---|---|---|
-| 吸收（不替换） | patch 层 packed snapshot；M3 渲染融合；M5 view 分离 | 已计划（§4） |
-| 观察 | ferroterm 加入 `bench/versus.ts` 对照；跟踪 6 个月（npm 发布？社区？kitty keyboard？） | 即日起 |
-| 对照 | 差分测试：ferroterm core 作 VT 行为对照源（同字节流比网格快照） | 随 bench |
-| 条件触发 | 若需要 inline images / 原生 OSC 133 blocks 且 ferroterm 届时成熟，做 6 周 spike：fork core + TS 适配层 + 全 E2E + bench 对照，用数据决定 | 触发时 |
+| 层             | 行动                                                                                                                                     | 时机         |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| 吸收（不替换） | patch 层 packed snapshot；M3 渲染融合；M5 view 分离                                                                                      | 已计划（§4） |
+| 观察           | ferroterm 加入 `bench/versus.ts` 对照；跟踪 6 个月（npm 发布？社区？kitty keyboard？）                                                   | 即日起       |
+| 对照           | 差分测试：ferroterm core 作 VT 行为对照源（同字节流比网格快照）                                                                          | 随 bench     |
+| 条件触发       | 若需要 inline images / 原生 OSC 133 blocks 且 ferroterm 届时成熟，做 6 周 spike：fork core + TS 适配层 + 全 E2E + bench 对照，用数据决定 | 触发时       |
+
+## 7. 更成熟的 core 候选（"就没有更成熟的？"）
+
+> 借助 2code 的同题调研（AkaraChen/2code#145，2026-05，AI CLI 托管
+> 场景评估 xterm.js 替代）+ crates.io 数据（2026-09-01 核实）补齐。
+
+### 7.1 全矩阵
+
+| core | 锤炼程度 | wasm 现状 | kitty keyboard | inline images | 状态 |
+|---|---|---|---|---|---|
+| **@xterm/headless 6.0** | VS Code 十年 | 不需要（纯 TS） | ✓（5.5 起） | ✗ | 活跃 |
+| **alacritty_terminal 0.26** | Alacritty（2017–） | 无先例，估 2-4k 行桥接 | ✓ | ✗ | 活跃（2026-04） |
+| termwiz 0.23 | WezTerm | 无先例 | ✓ | ✓ sixel/iTerm2 | 缓慢 |
+| **libghostty（官方 wasm）** | ghostty 本体 | **官方计划，未发布** | ✓ | ✓ kitty | alpha |
+| vt100 0.16 / avt 0.18 | headless 工具/TUI | 无 | ✗ | ✗ | 维护中 |
+| ferroterm | ~1 个月 | ✓ 现成 | ✗ | ✓ | 活跃 |
+| ghostty-vt（本 fork） | fork 自 coder/ghostty-web，已提升 1.3.1 | ✓ 现成 | ✓ | ✗ | 自维护 |
+
+### 7.2 @xterm/headless——被我们框架忽视的答案
+
+唯一同时满足"最成熟 + 零 wasm 边界"：MIT、VS Code 十年锤炼、kitty
+keyboard protocol 原生、IME 成熟、纯 TS。其内部 BufferLine 本就是
+TypedArray 位域——**fork 它加 packed snapshot 导出比给 ghostty 写
+Rust patch 更容易**。缺 inline images；解析在 JS（比 Zig/Rust wasm
+慢 1.4-4.4×，但对 4KB/帧的 PTY 流无实际差别——我们瓶颈在渲染）。
+
+当初"ghostty-web 优于 xterm.js"的决策前提（用它的渲染器）已在
+自研 WebGL 计划（M3）中解耦——该决策需要重新审视，但不急于现在。
+
+### 7.3 与 2code 结论互证
+
+2code 的分层结论：短期留在 xterm.js + 补丁（scroll-jump/kitty
+workaround）；中期等 xterm.js 7.0 viewport 修复；长期盯 libghostty
+官方 wasm 生态（browstty / obsidian-ghostty-terminal / vscode-bootty
+在长；**xterm.js 官方 #5686 也在讨论采用 libghostty 做内核**）。
+**没有任何一方选择"现在换 core"。**
+
+他们对 alacritty_terminal 的评估与我们一致：battle-tested + damage
+tracking，但零 WebView 集成先例、全自建桥（估 13-21 周到 parity，
+含渲染器/IME/平台集成）。
+
+### 7.4 新增风险登记：上游 wasm 内存腐化报告
+
+2code 引用 coder/ghostty-web #141：**emoji 后 `free()` 内存腐化，多
+tab 全崩**（v0.4.0 / 2025-12 的 vendored 版本）。本 fork 已提升
+ghostty 1.3.1（`7c0a19f`）+ 自修 degenerate grid 崩溃（`b68288b`），
+E2E 多 tab 未复现——大概率已越过，但**未定向验证**。列为待确认：
+定向复现 emoji 写入 + 多实例交替创建销毁。
+
+### 7.5 结论
+
+"更成熟的"存在（xterm.js headless、alacritty_terminal），但它们让
+"换"的理由更弱而非更强——成熟度维度我们已持有锤炼过的 Zig core +
+自有 patch 层。core 迁移的真实触发器收敛为两个：
+1. **功能缺口**：inline images / 原生 OSC 133 blocks 成为需求；
+2. **libghostty 官方 wasm 发布**（届时它同时是"最成熟 + 官方 + 现成
+   wasm"，可能连 xterm.js 都采用它——那是值得重新评估整个底座的时点）。
