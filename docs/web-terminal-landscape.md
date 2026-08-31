@@ -242,3 +242,34 @@ E2E 多 tab 未复现——大概率已越过，但**未定向验证**。列为�
 1. **功能缺口**：inline images / 原生 OSC 133 blocks 成为需求；
 2. **libghostty 官方 wasm 发布**（届时它同时是"最成熟 + 官方 + 现成
    wasm"，可能连 xterm.js 都采用它——那是值得重新评估整个底座的时点）。
+
+
+### 7.6 长尾穷尽（2026-09-01 复核）
+
+上一轮矩阵漏了 **hterm** 与三个长尾，此处补全并终结本问题：
+
+| 方案 | 状态 | 判定 |
+|---|---|---|
+| **hterm（Chromium libapps）** | GitHub 镜像 2022 停更，真身在 chromium.googlesource 活跃；**Chrome OS crosh + Blink Shell（iOS 最强终端，6919 星）双生产用户**，Blink 官方自述"simply used Chromium's HTerm" | Google 级锤炼，但 DOM 渲染、无 GPU 路径、Closure 风格古老 API——对本 fork 的 GPU 方向无可取内容 |
+| textual-web | 1462 星，2024-08 停更 1 年 | TUI 框架 web 化（同 ratzilla 定位），非 VT 终端 |
+| asciinema-player | 2920 星，活跃（2026-08） | 录制/直播**播放器**，VT 解析只读、无输入编码无 PTY 协议，不能作 core |
+| Blink Shell | 6919 星，活跃 | 终端引擎即 hterm（上表），无独立渲染器可借 |
+
+### 7.7 终极结论：成熟 + GPU 渲染的组合在 web 上不存在现成品
+
+**有生产用户锤炼的 web 终端渲染方案，全球只有两个：xterm.js 与
+hterm。**（前者 VS Code + 全部云厂商，后者 crosh + Blink。）GPU 加速
+路线人类到达的最远点是 VS Code 的 addon-webgl（WebGL1、CPU quad
+展开、2018–2021 架构）——之后的所有推进者（beamterm、ferroterm、
+FrankenTUI、本 fork）全部是无生产用户的新兴项目。
+
+结构性原因：web 终端渲染没有独立的商业价值——大厂云产品用 xterm.js
+已够（终端体验不是差异化卖点），独立终端产品（Warp/Ghostty/kitty）
+全在 native。没有金主，只有爱好者。
+
+对本 fork 的含义：M3 自研 WebGL 不是冒险而是**行业第三波**（VS Code
+第一波走通可行性，beamterm/ferroterm 第二波给出架构图纸），且我们
+持有 core 层自主权（patch 层）。等待成熟品 = 等待 libghostty 官方
+wasm 发布（届时它是最成熟 + 官方 + 现成 wasm 的唯一组合，可能连
+xterm.js 都采用——那是重估整个底座的时点，在此之前自己走到行业
+前沿就是最优解）。
