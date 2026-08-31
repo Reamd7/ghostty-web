@@ -133,3 +133,55 @@ Williams 状态机，from-scratch，非 fork）+ wasm + JS 双渲染器，覆盖
   都可被本 fork 吸收，且 patch 层自主权使前者完全可行。
 - 行业双票共识（ferroterm web 路径 + beamterm）：cell-grid 终端渲染的
   正确工具是手写 WebGL2 + instancing，不是 wgpu。
+
+## 6. 可行性评估：能否用 ferroterm 整体替换 ghostty wasm
+
+> 结论先行：**技术可行，战略不明智（当下）。** ferroterm 的核心收益
+> （快照协议、渲染组织、view 分离）不需要替换 core 就能吸收；替换的
+> 代价（重写全部集成 + 零生产验证的 VT core 上生产）与收益严重不对称。
+>
+> 以下每条均已核实（源码 / npm / crates.io，2026-09-01）。
+
+### 6.1 支持方证据
+
+- MIT；core 全部 Rust 源码约 120KB（parser 21KB + terminal 86KB +
+  keys/kitty/grid/cell 等），~3-4k 行——fork 后可维护。
+- 功能覆盖超 ghostty-vt 之处：OSC 133 command blocks（原生带 exit
+  status，`Terminal::blocks()`）、OSC 7 cwd、Sixel/iTerm2/Kitty inline
+  images、resize reflow、grapheme 合并、动态调色板（OSC 4/10/11/12）。
+- 快照协议与 WebGL 渲染组织是业界最优（§2/§3）。
+- 活跃（2026-07 单月 56 commits）。
+- 体积：~65KB gzip 全家桶 vs ghostty-vt.wasm 451KB（未 gzip，估
+  gzip 后 ~180-200KB）+ TS 层。约 3×，非数量级（修正"MB 级"的
+  预估——ghostty-vt 是精简 VT 核心不是完整 ghostty）。
+
+### 6.2 反对方证据（决定性）
+
+1. **未发布**：npm 与 crates.io 均无包。"换用" = vendor 一个 git
+   repo 的源码，无版本纪律、无变更契约。
+2. **零生产用户**：0 星、2 作者、项目年龄约 1 个月。终端模拟器的
+   VT 正确性要靠真实 TUI 使用量锤（xterm.js/ghostty 都锤了多年）；
+   50+ conformance 测试是必要不充分条件。
+3. **kitty keyboard protocol 缺失**（核实：keys.rs 仅 xterm 风格
+   `CSI 1;mod` 编码 + DECCKM，无 progressive enhancement、无 CSI u）。
+   我们的输入路径（26 键扩展、`CSI ? u` 查询处理，`04988b98`）在
+   ferroterm 上无落点；补齐 = 在陌生 Rust 代码里实现 kitty 键盘状态机。
+   且未知 CSI 静默吞掉后 vim 查询靠超时降级，反而引入可感知延迟。
+4. **OSC 52 clipboard、undercurl 均无**（核实：terminal.rs 2345 行
+   零命中）。
+5. **替换成本**：fork 的全部定制（wasm-api patch、字体度量、transform
+   坐标、选择管理器、输入 26 键）+ 母仓 TerminalView/TerminalViewport/
+   多设备协商协议要对着新 cell 模型重写数据源，E2E 全量重验。
+6. **性能无实证优势**：ferroterm 公布数字为 native 口径；与 ghostty
+   (Zig) wasm 无对照 bench。替换的性能理由不成立，协议理由不需要
+   替换（§4 行动项 1：我们自己的 wasm-api patch 层可实现 ferroterm
+   级 packed snapshot）。
+
+### 6.3 分层建议
+
+| 层 | 行动 | 时机 |
+|---|---|---|
+| 吸收（不替换） | patch 层 packed snapshot；M3 渲染融合；M5 view 分离 | 已计划（§4） |
+| 观察 | ferroterm 加入 `bench/versus.ts` 对照；跟踪 6 个月（npm 发布？社区？kitty keyboard？） | 即日起 |
+| 对照 | 差分测试：ferroterm core 作 VT 行为对照源（同字节流比网格快照） | 随 bench |
+| 条件触发 | 若需要 inline images / 原生 OSC 133 blocks 且 ferroterm 届时成熟，做 6 周 spike：fork core + TS 适配层 + 全 E2E + bench 对照，用数据决定 | 触发时 |
