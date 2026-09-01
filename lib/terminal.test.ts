@@ -338,6 +338,22 @@ describe('Terminal', () => {
       const term = await createIsolatedTerminal();
       expect(() => term.focus()).not.toThrow();
     });
+
+    test('container focus redirects to the hidden textarea (IME composition target)', async () => {
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container!);
+
+      // Focus the contenteditable container directly. Without the redirect,
+      // a focused contenteditable container becomes the IME composition
+      // target and the browser inserts preedit text / caret <br> nodes into
+      // the container, shifting the canvas and clipping the bottom rows.
+      term.element!.focus();
+      // focusin dispatches synchronously from focus(), so the redirect has
+      // already been applied; no timer wait is needed.
+      expect(document.activeElement).toBe(term.textarea);
+
+      term.dispose();
+    });
   });
 
   describe('Addons', () => {

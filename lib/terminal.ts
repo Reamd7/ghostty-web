@@ -417,7 +417,6 @@ export class Terminal implements ITerminalCore {
 
       // Focus textarea on interaction - preventDefault before focus
       const textarea = this.textarea;
-      // Desktop: mousedown
       this.canvas.addEventListener('mousedown', (ev) => {
         ev.preventDefault();
         textarea.focus();
@@ -426,6 +425,19 @@ export class Terminal implements ITerminalCore {
       this.canvas.addEventListener('touchend', (ev) => {
         ev.preventDefault();
         textarea.focus();
+      });
+
+      // The container is contenteditable for extension detection, but it must
+      // never HOLD focus: a focused contenteditable container becomes the IME
+      // composition target, and the browser then inserts preedit text and
+      // caret <br> nodes directly into the container. Those nodes shift the
+      // canvas down and clip the bottom rows (overflow:hidden), and they
+      // survive composition end. All keyboard input is handled from the
+      // hidden textarea, so redirect container focus there.
+      parent.addEventListener('focusin', (ev) => {
+        if (ev.target === parent && document.activeElement === parent) {
+          textarea.focus();
+        }
       });
 
       // Create renderer

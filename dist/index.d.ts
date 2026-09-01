@@ -895,7 +895,15 @@ export declare class InputHandler {
      */
     private handleCompositionEnd;
     /**
-     * Cleanup text nodes in container after composition
+     * Cleanup composition artifacts in the container.
+     *
+     * When the container is (or was) a contenteditable IME target, the browser
+     * inserts preedit text nodes during composition and a caret <br> when the
+     * composition ends. Both shift the canvas down and clip the bottom rows
+     * under overflow:hidden, and the <br> survives composition end. The
+     * container legitimately contains only the canvas and the hidden textarea
+     * (both appended by Terminal), so any text node or bare <br> is an editing
+     * artifact and gets removed.
      */
     private cleanupCompositionTextNodes;
     /**

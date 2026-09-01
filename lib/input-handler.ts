@@ -709,17 +709,23 @@ export class InputHandler {
   }
 
   /**
-   * Cleanup text nodes in container after composition
+   * Cleanup composition artifacts in the container.
+   *
+   * When the container is (or was) a contenteditable IME target, the browser
+   * inserts preedit text nodes during composition and a caret <br> when the
+   * composition ends. Both shift the canvas down and clip the bottom rows
+   * under overflow:hidden, and the <br> survives composition end. The
+   * container legitimately contains only the canvas and the hidden textarea
+   * (both appended by Terminal), so any text node or bare <br> is an editing
+   * artifact and gets removed.
    */
   private cleanupCompositionTextNodes(): void {
-    // Cleanup text nodes in container (fix for duplicate text display)
-    // When the container is contenteditable, the browser might insert text nodes
-    // upon composition end. We need to remove them to prevent duplicate display.
     if (this.container && this.container.childNodes) {
       for (let i = this.container.childNodes.length - 1; i >= 0; i--) {
         const node = this.container.childNodes[i];
-        // Node.TEXT_NODE === 3
-        if (node.nodeType === 3) {
+        // Node.TEXT_NODE === 3; a bare <br> is the caret placeholder the
+        // contenteditable editor leaves behind.
+        if (node.nodeType === 3 || node.nodeName === 'BR') {
           this.container.removeChild(node);
         }
       }

@@ -420,6 +420,35 @@ describe('InputHandler', () => {
       expect(dataReceived).toEqual(['你好']);
     });
 
+    test('cleans up caret <br> left by contenteditable after composition', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      // Simulate the browser's contenteditable editor leaving a caret <br>
+      // behind after the preedit text node was removed.
+      const brNode = { nodeType: 1, nodeName: 'BR' } as unknown as Node;
+      container.appendChild(brNode);
+      const canvasNode = { nodeType: 1, nodeName: 'CANVAS' } as Node;
+      container.appendChild(canvasNode);
+
+      expect(container.childNodes.length).toBe(2);
+
+      const endEvent = createCompositionEvent('compositionend', '你');
+      container.dispatchEvent(endEvent);
+
+      // The <br> must be removed: it shifts the canvas down and clips the
+      // bottom rows under overflow:hidden. Real elements are kept.
+      expect(container.childNodes.length).toBe(1);
+      expect(container.childNodes[0]).toBe(canvasNode);
+      expect(dataReceived).toEqual(['你']);
+    });
+
     test('avoids duplicate commit when compositionend fires before beforeinput', () => {
       const inputElement = createMockContainer();
       const handler = new InputHandler(
