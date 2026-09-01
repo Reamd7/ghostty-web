@@ -70,15 +70,6 @@ function spyOnRendererRender(term: Terminal): {
   };
 }
 
-function expectEchoRender(
-  term: Terminal,
-  renderArgs: Array<Parameters<NonNullable<Terminal['renderer']>['render']>>
-): void {
-  expect(renderArgs).toHaveLength(1);
-  expect(renderArgs[0][0]).toBe(term.wasmTerm);
-  expect(renderArgs[0][1]).toBe(false);
-}
-
 describe('Terminal', () => {
   let container: HTMLElement;
 
@@ -2959,7 +2950,7 @@ describe('Write Behavior', () => {
 // xterm.js Compatibility: Echo Latency Optimization
 // ==========================================================================
 
-describe('Echo Latency Optimization', () => {
+describe('On-demand render scheduling', () => {
   let container: HTMLElement | null = null;
 
   beforeEach(async () => {
@@ -2976,7 +2967,42 @@ describe('Echo Latency Optimization', () => {
     }
   });
 
-  test('renders synchronously for the first write after user input', async () => {
+  /**
+   * Single-assertion test seam: Terminal defines runRenderTransaction, but
+   * private members block a direct structural cast, so the shape is fixed
+   * here and bridged once.
+   */
+  function runScheduledFrame(term: Terminal): void {
+    // SAFETY: single cast to an optional-member shape the public Terminal
+    // type satisfies; the guard rejects missing members at runtime.
+    const method = (term as { runRenderTransaction?: () => void }).runRenderTransaction;
+    if (!method) throw new Error('runRenderTransaction missing on Terminal');
+    method.call(term);
+  }
+
+  test('write schedules a frame instead of rendering synchronously', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    const { renderArgs, restore } = spyOnRendererRender(term);
+
+    try {
+      term.write('hello');
+      // No synchronous render: the draw happens in the scheduled transaction
+      expect(renderArgs).toHaveLength(0);
+
+      runScheduledFrame(term);
+      expect(renderArgs).toHaveLength(1);
+      expect(renderArgs[0][0]).toBe(term.wasmTerm);
+      expect(renderArgs[0][1]).toBe(false);
+    } finally {
+      restore();
+      term.dispose();
+    }
+  });
+
+  test('echo after user input renders on the scheduled frame', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -2988,14 +3014,17 @@ describe('Echo Latency Optimization', () => {
       expect(renderArgs).toHaveLength(0);
 
       term.write('x');
-      expectEchoRender(term, renderArgs);
+      expect(renderArgs).toHaveLength(0);
+      runScheduledFrame(term);
+      expect(renderArgs).toHaveLength(1);
+      expect(renderArgs[0][0]).toBe(term.wasmTerm);
     } finally {
       restore();
       term.dispose();
     }
   });
 
-  test('does not synchronously render subsequent output without another user input', async () => {
+  test('multiple writes coalesce into one frame render', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3004,10 +3033,12 @@ describe('Echo Latency Optimization', () => {
 
     try {
       term.input('x', true);
-      term.write('x');
-      expectEchoRender(term, renderArgs);
+      term.write('chunk-a');
+      term.write('chunk-b');
+      term.write('chunk-c');
+      expect(renderArgs).toHaveLength(0);
 
-      term.write('bulk output');
+      runScheduledFrame(term);
       expect(renderArgs).toHaveLength(1);
     } finally {
       restore();
@@ -3015,7 +3046,29 @@ describe('Echo Latency Optimization', () => {
     }
   });
 
-  test('does not synchronously render after programmatic input', async () => {
+  test('re-entrant write inside an onData listener joins the same frame', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+    term.onData((data) => term.write(data));
+    const { renderArgs, restore } = spyOnRendererRender(term);
+
+    try {
+      term.input('z', true);
+      expect(renderArgs).toHaveLength(0);
+
+      term.write('bulk output');
+      expect(renderArgs).toHaveLength(0);
+      runScheduledFrame(term);
+      expect(renderArgs).toHaveLength(1);
+    } finally {
+      restore();
+      term.dispose();
+    }
+  });
+
+  test('write callback runs after the frame render that includes the write', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3023,56 +3076,22 @@ describe('Echo Latency Optimization', () => {
     const { renderArgs, restore } = spyOnRendererRender(term);
 
     try {
-      term.input('x', false);
-      expect(renderArgs).toHaveLength(0);
+      let rendersWhenCallbackRan = -1;
+      term.write('data', () => {
+        rendersWhenCallbackRan = renderArgs.length;
+      });
 
-      term.write('x');
-      expect(renderArgs).toHaveLength(0);
+      expect(rendersWhenCallbackRan).toBe(-1);
+      runScheduledFrame(term);
+      expect(rendersWhenCallbackRan).toBe(1);
+      expect(renderArgs).toHaveLength(1);
     } finally {
       restore();
       term.dispose();
     }
   });
 
-  test('renders synchronously for the first write after paste', async () => {
-    if (!container) return;
-
-    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-    term.open(container);
-    const { renderArgs, restore } = spyOnRendererRender(term);
-
-    try {
-      term.paste('hello');
-      expect(renderArgs).toHaveLength(0);
-
-      term.write('hello');
-      expectEchoRender(term, renderArgs);
-    } finally {
-      restore();
-      term.dispose();
-    }
-  });
-
-  test('does not mark echo when stdin is disabled', async () => {
-    if (!container) return;
-
-    const term = await createIsolatedTerminal({ cols: 80, rows: 24, disableStdin: true });
-    term.open(container);
-    const { renderArgs, restore } = spyOnRendererRender(term);
-
-    try {
-      term.input('x', true);
-      term.paste('hello');
-      term.write('xhello');
-
-      expect(renderArgs).toHaveLength(0);
-    } finally {
-      restore();
-      term.dispose();
-    }
-  });
-
-  test('renders synchronously for the first write after keyboard input', async () => {
+  test('keyboard echo renders on the scheduled frame', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3093,26 +3112,32 @@ describe('Echo Latency Optimization', () => {
 
       expect(receivedData.length).toBeGreaterThan(0);
       term.write('a');
-      expectEchoRender(term, renderArgs);
+      expect(renderArgs).toHaveLength(0);
+      runScheduledFrame(term);
+      expect(renderArgs).toHaveLength(1);
     } finally {
       restore();
       term.dispose();
     }
   });
 
-  test('marks echo before firing synchronous onData listeners', async () => {
+  test('disableStdin suppresses input data, but writes still paint on the frame', async () => {
     if (!container) return;
 
-    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24, disableStdin: true });
     term.open(container);
-    term.onData((data) => term.write(data));
     const { renderArgs, restore } = spyOnRendererRender(term);
+    const receivedData: string[] = [];
+    term.onData((data) => receivedData.push(data));
 
     try {
-      term.input('z', true);
-      expectEchoRender(term, renderArgs);
+      term.input('x', true);
+      term.paste('hello');
+      expect(receivedData).toEqual([]);
+      expect(renderArgs).toHaveLength(0);
 
-      term.write('bulk output');
+      term.write('xhello');
+      runScheduledFrame(term);
       expect(renderArgs).toHaveLength(1);
     } finally {
       restore();

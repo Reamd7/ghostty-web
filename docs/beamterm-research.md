@@ -17,9 +17,9 @@
 两处事实错误（本次核实）：
 
 1. **它不用 wgpu**。`beamterm-renderer/Cargo.toml` 依赖清单：`wasm-bindgen`
-   + `web-sys`（`WebGl2RenderingContext` 等 feature）——手写 WebGL2 绑定，
-   零 wgpu/GPU 抽象层。"渲染器整体 wasm 化没有障碍（wgpu 直接驱动 GPU）"
-   的论据不成立，但同时也意味着**没有 wgpu 的体积与工具链重量**。
+   - `web-sys`（`WebGl2RenderingContext` 等 feature）——手写 WebGL2 绑定，
+     零 wgpu/GPU 抽象层。"渲染器整体 wasm 化没有障碍（wgpu 直接驱动 GPU）"
+     的论据不成立，但同时也意味着**没有 wgpu 的体积与工具链重量**。
 2. **性能声称的依据比预期扎实**。45k cells（426×106）< 1ms 是 2019 桌面硬件
    （i9-9900K / RTX 2070）的实测口径，且该数字**含** ratatui buffer 翻译 +
    GPU 上传 + draw call 全链。数字可信；硬件口径偏高端（见 §4 系数讨论）。
@@ -28,15 +28,15 @@
 
 ## 2. 项目事实（2026-09-01 核实）
 
-| 维度 | 数据 |
-|---|---|
-| 仓库 | `kofany/beamterm`，MIT，纯 Rust |
-| 星 / fork | **0 / 0** |
-| npm | `@beamterm/renderer` 1.0.0（2026-03-30 发布），**周下载 91**，unpacked 5.9MB（含 atlas 数据与 demo） |
-| 开发窗口 | 2025-10 起，2025-12（40 commits）+ 2026-01（45 commits）高强度，**主线最后 commit 2026-01-19** |
-| GitHub releases | 0（仅 crates.io + npm 发布，16 版 0.2.0→1.0.0） |
-| 作者 | kofany（个人项目，无组织背书） |
-| CI | GitHub Actions 有 wasm 构建 + wasm-pack test（有测试纪律，非玩具） |
+| 维度            | 数据                                                                                                 |
+| --------------- | ---------------------------------------------------------------------------------------------------- |
+| 仓库            | `kofany/beamterm`，MIT，纯 Rust                                                                      |
+| 星 / fork       | **0 / 0**                                                                                            |
+| npm             | `@beamterm/renderer` 1.0.0（2026-03-30 发布），**周下载 91**，unpacked 5.9MB（含 atlas 数据与 demo） |
+| 开发窗口        | 2025-10 起，2025-12（40 commits）+ 2026-01（45 commits）高强度，**主线最后 commit 2026-01-19**       |
+| GitHub releases | 0（仅 crates.io + npm 发布，16 版 0.2.0→1.0.0）                                                      |
+| 作者            | kofany（个人项目，无组织背书）                                                                       |
+| CI              | GitHub Actions 有 wasm 构建 + wasm-pack test（有测试纪律，非玩具）                                   |
 
 **成熟度结论：零生产验证、停滞 7 个月、单人项目。作为运行时依赖 = 事实
 上自己维护一个陌生 Rust 代码库。依赖引入路径出局。**
@@ -100,8 +100,8 @@ float ≈ 40B/cell 每帧 JS 生成 + 上传。beamterm 是 **8B/cell 且静态�
 ### 3.4 健壮性协议（M1 计划可直接抄清单）
 
 - **context loss**：`GpuResources` 结构（shader/VAO/UBO/sampler 全量收口）
-  + `context_loss.rs`，恢复 = 重建该结构。atlas/selection/cells 等 CPU 态
-  存活。
+  - `context_loss.rs`，恢复 = 重建该结构。atlas/selection/cells 等 CPU 态
+    存活。
 - **atlas 热替换**（`replace_atlas`）：旧 glyph_id → 查 symbol → 新 atlas
   重解析 → 全网格平移 + 双宽右半格修正 + resize 联动。字体/字号切换的
   完整迁移协议，比"全失效重光栅化"更细。
@@ -133,11 +133,11 @@ hyperlink/scrollback/theme 全在 TS——等于重写整个前端。排除。
 
 ## 4. 三条路径评估
 
-| 路径 | 结论 | 一句话理由 |
-|---|---|---|
-| A. npm 依赖引入（JS API） | ✗ | 双 wasm 过 JS 中转 = 重新引入 R1 消灭的跨界；0 社区 + 停更 7 个月 + 单人维护 |
-| B. Rust 侧链同一个 wasm | ✗ | 要求 ghostty VT + renderer 同 wasm，TS 侧全部交互逻辑需 Rust 重写，工程量与风险不成比例 |
-| C. **TS 移植其 GPU 设计** | ✓ | WebGL2/整数 attribute/GLSL 在 TS 直接可用；shader 与 buffer 协议按 §3.2/3.3 复刻；无新工具链、无跨界、无外部依赖 |
+| 路径                      | 结论 | 一句话理由                                                                                                       |
+| ------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------- |
+| A. npm 依赖引入（JS API） | ✗    | 双 wasm 过 JS 中转 = 重新引入 R1 消灭的跨界；0 社区 + 停更 7 个月 + 单人维护                                     |
+| B. Rust 侧链同一个 wasm   | ✗    | 要求 ghostty VT + renderer 同 wasm，TS 侧全部交互逻辑需 Rust 重写，工程量与风险不成比例                          |
+| C. **TS 移植其 GPU 设计** | ✓    | WebGL2/整数 attribute/GLSL 在 TS 直接可用；shader 与 buffer 协议按 §3.2/3.3 复刻；无新工具链、无跨界、无外部依赖 |
 
 ## 5. 对 `webgl-renderer-plan.md` 的修正建议
 
@@ -163,10 +163,11 @@ instanced 设计**，具体替换：
    LRU 合并/失效协议更成熟，beamterm 的 4096 固定 slot 是简化）。
 
 M1-M6 里程碑结构、WebGL1→WebGL2 决策、auto 降级链、决策门（R1-R3 先行
-+ profile:terminal 基线）不变。**注意：instanced + integer attribute +
-sampler2DArray 都是 WebGL2 特性，M0 的"WebGL1 起步"决策需要重审为
-WebGL2（VS Code 数据：canvas 渲染器保留仅因个别旧 iPad 无 WebGL2；本
-fork 走 auto 降级链覆盖该人群即可）。**
+
+- profile:terminal 基线）不变。**注意：instanced + integer attribute +
+  sampler2DArray 都是 WebGL2 特性，M0 的"WebGL1 起步"决策需要重审为
+  WebGL2（VS Code 数据：canvas 渲染器保留仅因个别旧 iPad 无 WebGL2；本
+  fork 走 auto 降级链覆盖该人群即可）。**
 
 ## 6. 结论
 

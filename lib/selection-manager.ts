@@ -540,8 +540,10 @@ export class SelectionManager {
         // Convert to canvas-local (natural, pre-transform) coordinates — the
         // canvas may carry a CSS transform, and pixelToCell divides by
         // natural-space metrics.
-        const scaleX = rect.width > 0 && canvas.offsetWidth > 0 ? canvas.offsetWidth / rect.width : 1;
-        const scaleY = rect.height > 0 && canvas.offsetHeight > 0 ? canvas.offsetHeight / rect.height : 1;
+        const scaleX =
+          rect.width > 0 && canvas.offsetWidth > 0 ? canvas.offsetWidth / rect.width : 1;
+        const scaleY =
+          rect.height > 0 && canvas.offsetHeight > 0 ? canvas.offsetHeight / rect.height : 1;
         const offsetX = (clampedX - rect.left) * scaleX;
         const offsetY = (clampedY - rect.top) * scaleY;
 
@@ -1075,13 +1077,13 @@ export class SelectionManager {
   }
 
   /**
-   * Request a render update (triggers selection overlay redraw)
+   * Request a render update (triggers selection overlay redraw).
+   * Selection changes invalidate rows on their own — without this the
+   * terminal has no permanent render loop that would pick them up.
+   * clearSelection() additionally marks affected rows in dirtySelectionRows
+   * so the renderer repaints the cleared overlay.
    */
   private requestRender(): void {
-    // The render loop will automatically pick up the new selection state
-    // and redraw the affected lines. This happens at 60fps.
-    //
-    // Note: When clearSelection() is called, it adds dirty rows to dirtySelectionRows
-    // which the renderer can use to know which lines to redraw.
+    this.terminal.scheduleRender();
   }
 }

@@ -7,13 +7,15 @@
  * - Full color support (256-color palette + RGB)
  * - All text styles (bold, italic, underline, strikethrough, etc.)
  * - Multiple cursor styles (block, underline, bar)
- * - Dirty line optimization for 60 FPS
+ * - Dirty-line rendering driven by on-demand frames: one viewport
+ *   extraction per frame, no per-row copies
  */
 
 import type { ITheme } from './interfaces';
+import { getTerminalPerfCounters } from './perf-counters';
 import type { SelectionManager } from './selection-manager';
 import type { GhosttyCell, ILink } from './types';
-import { CellFlags } from './types';
+import { CellFlags, DirtyState } from './types';
 
 // Interface for objects that can be rendered
 export interface IRenderable {
@@ -23,6 +25,19 @@ export interface IRenderable {
   isRowDirty(y: number): boolean;
   /** Returns true if a full redraw is needed (e.g., screen change) */
   needsFullRedraw?(): boolean;
+  /**
+   * Render-frame fast path. beginFrame() performs at most one WASM update()
+   * and caches it for the whole synchronous transaction; every update()/
+   * getCursor()/needsFullRedraw() call between begin/end shares that call.
+   */
+  beginFrame?(): number; // DirtyState
+  endFrame?(): void;
+  /**
+   * In-frame shared viewport pool (read rows as pool[y * cols + x]). Valid
+   * only until the next viewport extraction. Returns null on extraction
+   * failure — the renderer then aborts without clearing dirty state.
+   */
+  getViewportPool?(): GhosttyCell[] | null;
   clearDirty(): void;
   /**
    * Get the full grapheme string for a cell at (row, col).
@@ -99,6 +114,34 @@ export const DEFAULT_THEME: Required<ITheme> = {
   brightWhite: '#ffffff',
 };
 
+type LinkRange = { startX: number; startY: number; endX: number; endY: number };
+
+/** Field-wise null-safe link-range equality (replaces JSON.stringify compares). */
+function linkRangesEqual(a: LinkRange | null, b: LinkRange | null): boolean {
+  if (a === b) return true; // both null, or the identical object
+  if (!a || !b) return false;
+  return a.startX === b.startX && a.startY === b.startY && a.endX === b.endX && a.endY === b.endY;
+}
+
+/**
+ * Whether any cell in cells[offset .. offset+count) carries either hyperlink
+ * id. Reads the shared pool or a scrollback row in place — no row slice.
+ */
+function rowContainsHyperlink(
+  cells: GhosttyCell[],
+  offset: number,
+  count: number,
+  currentId: number,
+  previousId: number
+): boolean {
+  const end = Math.min(offset + count, cells.length);
+  for (let i = offset; i < end; i++) {
+    const id = cells[i].hyperlink_id;
+    if (id === currentId || id === previousId) return true;
+  }
+  return false;
+}
+
 // ============================================================================
 // CanvasRenderer Class
 // ============================================================================
@@ -152,6 +195,13 @@ export class CanvasRenderer {
     endX: number;
     endY: number;
   } | null = null;
+
+  /**
+   * Repaint request hook for state changes that originate inside the
+   * renderer (cursor blink toggle, blink-stop cursor restore). Wired by
+   * Terminal to its on-demand render scheduler.
+   */
+  public onRenderRequest: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
     this.canvas = canvas;
@@ -319,11 +369,70 @@ export class CanvasRenderer {
     // Store buffer reference for grapheme lookups in renderCell
     this.currentBuffer = buffer;
 
-    // getCursor() calls update() internally to ensure fresh state.
-    // Multiple update() calls are safe - dirty state persists until clearDirty().
+    // One WASM update() per transaction: beginFrame() caches the dirty state
+    // shared by every update()/getCursor()/needsFullRedraw() call inside.
+    buffer.beginFrame?.();
+    try {
+      this.renderFrame(buffer, forceAll, viewportY, scrollbackProvider, scrollbarOpacity);
+    } finally {
+      buffer.endFrame?.();
+    }
+  }
+
+  /**
+   * One render frame.
+   *
+   * Screen rows are read from a single shared viewport pool (fetched lazily,
+   * at most once per frame) instead of per-row getLine() copies. Scrollback
+   * rows still come from the scrollback provider — they are not part of the
+   * active-screen pool.
+   *
+   * If the viewport pool cannot be fetched, the frame aborts WITHOUT
+   * clearing dirty state so the next frame retries instead of silently
+   * dropping the update.
+   */
+  private renderFrame(
+    buffer: IRenderable,
+    forceAll: boolean,
+    viewportY: number,
+    scrollbackProvider: IScrollbackProvider | undefined,
+    scrollbarOpacity: number
+  ): void {
+    const frameDirty = buffer.beginFrame?.();
     const cursor = buffer.getCursor();
     const dims = buffer.getDimensions();
     const scrollbackLength = scrollbackProvider ? scrollbackProvider.getScrollbackLength() : 0;
+    const floorViewportY = Math.floor(viewportY);
+
+    // Lazily-fetched shared viewport pool. `failed` is sticky for the frame:
+    // once extraction fails, every subsequent consumer aborts the frame.
+    let pool: GhosttyCell[] | null = null;
+    let poolReady = false;
+    let poolFailed = false;
+    let poolFetched = false;
+    const ensurePool = (): boolean => {
+      if (!poolFetched) {
+        poolFetched = true;
+        if (buffer.getViewportPool) {
+          pool = buffer.getViewportPool();
+          poolReady = pool !== null;
+          poolFailed = pool === null;
+        }
+      }
+      return !poolFailed;
+    };
+
+    /** Paint screen row `y` from the shared pool (legacy getLine() fallback for buffers without pool support). Returns false on pool failure. */
+    const drawScreenRow = (y: number): boolean => {
+      if (!ensurePool()) return false;
+      if (poolReady && pool) {
+        this.renderRowCells(pool, y * dims.cols, y, dims.cols);
+      } else {
+        const line = buffer.getLine(y);
+        if (line) this.renderRowCells(line, 0, y, dims.cols);
+      }
+      return true;
+    };
 
     // Check if buffer needs full redraw (e.g., screen change between normal/alternate)
     if (buffer.needsFullRedraw?.()) {
@@ -353,18 +462,12 @@ export class CanvasRenderer {
       // Mark cursor lines as needing redraw
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
         // Need to redraw cursor line
-        const line = buffer.getLine(cursor.y);
-        if (line) {
-          this.renderLine(line, cursor.y, dims.cols);
-        }
+        if (!drawScreenRow(cursor.y)) return;
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
         // Also redraw old cursor line if cursor moved to different line
         if (!forceAll && !buffer.isRowDirty(this.lastCursorPosition.y)) {
-          const line = buffer.getLine(this.lastCursorPosition.y);
-          if (line) {
-            this.renderLine(line, this.lastCursorPosition.y, dims.cols);
-          }
+          if (!drawScreenRow(this.lastCursorPosition.y)) return;
         }
       }
     }
@@ -385,66 +488,84 @@ export class CanvasRenderer {
       }
     }
 
-    // Always mark dirty selection rows for redraw (to clear old overlay)
+    // Always mark dirty selection rows for redraw (to clear old overlay).
+    // Kept until the frame actually paints so an aborted frame retries.
+    let hasPendingDirtySelectionRows = false;
     if (this.selectionManager) {
       const dirtyRows = this.selectionManager.getDirtySelectionRows();
       if (dirtyRows.size > 0) {
+        hasPendingDirtySelectionRows = true;
         for (const row of dirtyRows) {
           selectionRows.add(row);
         }
-        // Clear the dirty rows tracking after marking for redraw
-        this.selectionManager.clearDirtySelectionRows();
       }
     }
 
     // Track rows with hyperlinks that need redraw when hover changes
     const hyperlinkRows = new Set<number>();
     const hyperlinkChanged = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId;
-    const linkRangeChanged =
-      JSON.stringify(this.hoveredLinkRange) !== JSON.stringify(this.previousHoveredLinkRange);
+    const linkRangeChanged = !linkRangesEqual(this.hoveredLinkRange, this.previousHoveredLinkRange);
 
     if (hyperlinkChanged) {
       // Find rows containing the old or new hovered hyperlink
       // Must check the correct buffer based on viewportY (scrollback vs screen)
+      if (!ensurePool()) return;
       for (let y = 0; y < dims.rows; y++) {
-        let line: GhosttyCell[] | null = null;
-
         // Same logic as rendering: fetch from scrollback or screen
-        if (viewportY > 0) {
-          if (y < viewportY && scrollbackProvider) {
-            // This row is from scrollback
-            // Floor viewportY for array access (handles fractional values during smooth scroll)
-            const scrollbackOffset = scrollbackLength - Math.floor(viewportY) + y;
-            line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
-          } else {
-            // This row is from visible screen
-            const screenRow = y - Math.floor(viewportY);
-            line = buffer.getLine(screenRow);
+        if (viewportY > 0 && y < viewportY && scrollbackProvider) {
+          // This row is from scrollback
+          const scrollbackOffset = scrollbackLength - floorViewportY + y;
+          const line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
+          if (
+            line &&
+            rowContainsHyperlink(
+              line,
+              0,
+              line.length,
+              this.hoveredHyperlinkId,
+              this.previousHoveredHyperlinkId
+            )
+          ) {
+            hyperlinkRows.add(y);
           }
         } else {
-          // At bottom - fetch from visible screen
-          line = buffer.getLine(y);
-        }
-
-        if (line) {
-          for (const cell of line) {
+          // This row is from visible screen
+          const screenRow = viewportY > 0 ? y - floorViewportY : y;
+          if (poolReady && pool) {
+            const base = screenRow * dims.cols;
             if (
-              cell.hyperlink_id === this.hoveredHyperlinkId ||
-              cell.hyperlink_id === this.previousHoveredHyperlinkId
+              rowContainsHyperlink(
+                pool,
+                base,
+                dims.cols,
+                this.hoveredHyperlinkId,
+                this.previousHoveredHyperlinkId
+              )
             ) {
               hyperlinkRows.add(y);
-              break; // Found hyperlink in this row
+            }
+          } else {
+            const line = buffer.getLine(screenRow);
+            if (
+              line &&
+              rowContainsHyperlink(
+                line,
+                0,
+                line.length,
+                this.hoveredHyperlinkId,
+                this.previousHoveredHyperlinkId
+              )
+            ) {
+              hyperlinkRows.add(y);
             }
           }
         }
       }
-      // Update previous state
-      this.previousHoveredHyperlinkId = this.hoveredHyperlinkId;
     }
 
-    // Track rows affected by link range changes (for regex URLs)
+    // Track rows affected by link range changes (for regex URLs): rows from
+    // both the old and new ranges must repaint so the underline moves.
     if (linkRangeChanged) {
-      // Add rows from old range
       if (this.previousHoveredLinkRange) {
         for (
           let y = this.previousHoveredLinkRange.startY;
@@ -454,17 +575,25 @@ export class CanvasRenderer {
           hyperlinkRows.add(y);
         }
       }
-      // Add rows from new range
       if (this.hoveredLinkRange) {
         for (let y = this.hoveredLinkRange.startY; y <= this.hoveredLinkRange.endY; y++) {
           hyperlinkRows.add(y);
         }
       }
-      this.previousHoveredLinkRange = this.hoveredLinkRange;
     }
-
-    // Track if anything was actually rendered
-    let anyLinesRendered = false;
+    // Nothing dirty, nothing moved, nothing to overlay: skip the frame
+    // entirely (no viewport fetch, no per-row dirty queries, no clearDirty).
+    if (
+      frameDirty === DirtyState.NONE &&
+      !forceAll &&
+      !cursorMoved &&
+      !this.cursorBlink &&
+      selectionRows.size === 0 &&
+      hyperlinkRows.size === 0 &&
+      !(scrollbackProvider && scrollbarOpacity > 0)
+    ) {
+      return;
+    }
 
     // Determine which rows need rendering.
     // We also include adjacent rows (above and below) for each dirty row to handle
@@ -476,7 +605,9 @@ export class CanvasRenderer {
       const needsRender =
         viewportY > 0
           ? true
-          : forceAll || buffer.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
+          : frameDirty === DirtyState.NONE
+            ? selectionRows.has(y) || hyperlinkRows.has(y)
+            : forceAll || buffer.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
 
       if (needsRender) {
         rowsToRender.add(y);
@@ -492,34 +623,21 @@ export class CanvasRenderer {
         continue;
       }
 
-      anyLinesRendered = true;
-
       // Fetch line from scrollback or visible screen
-      let line: GhosttyCell[] | null = null;
-      if (viewportY > 0) {
-        // Scrolled up - need to fetch from scrollback + visible screen
-        // When scrolled up N lines, we want to show:
-        // - Scrollback lines (from the end) + visible screen lines
-
-        // Check if this row should come from scrollback or visible screen
-        if (y < viewportY && scrollbackProvider) {
-          // This row is from scrollback (upper part of viewport)
-          // Get from end of scrollback buffer
-          // Floor viewportY for array access (handles fractional values during smooth scroll)
-          const scrollbackOffset = scrollbackLength - Math.floor(viewportY) + y;
-          line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
-        } else {
-          // This row is from visible screen (lower part of viewport)
-          const screenRow = viewportY > 0 ? y - Math.floor(viewportY) : y;
-          line = buffer.getLine(screenRow);
+      if (viewportY > 0 && y < viewportY && scrollbackProvider) {
+        // This row is from scrollback (upper part of viewport).
+        // Get from end of scrollback buffer (floor handles fractional smooth scroll)
+        const scrollbackOffset = scrollbackLength - floorViewportY + y;
+        const line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
+        if (line) {
+          this.renderRowCells(line, 0, y, dims.cols);
         }
+      } else if (viewportY > 0) {
+        // This row is from visible screen (lower part of viewport)
+        if (!drawScreenRow(y - floorViewportY)) return;
       } else {
         // At bottom - fetch from visible screen
-        line = buffer.getLine(y);
-      }
-
-      if (line) {
-        this.renderLine(line, y, dims.cols);
+        if (!drawScreenRow(y)) return;
       }
     }
 
@@ -530,7 +648,8 @@ export class CanvasRenderer {
 
     // Render cursor (only if we're at the bottom, not scrolled)
     if (viewportY === 0 && cursor.visible && this.cursorVisible) {
-      this.renderCursor(cursor.x, cursor.y);
+      if (!ensurePool()) return;
+      this.renderCursor(buffer, poolReady && pool ? pool : null, cursor.x, cursor.y, dims.cols);
     }
 
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
@@ -541,6 +660,18 @@ export class CanvasRenderer {
     // Update last cursor position
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
 
+    // Previous-hover state is only committed after the rows it affects have
+    // been painted, so an aborted frame rescans them on the next attempt.
+    if (hyperlinkChanged) {
+      this.previousHoveredHyperlinkId = this.hoveredHyperlinkId;
+    }
+    if (linkRangeChanged) {
+      this.previousHoveredLinkRange = this.hoveredLinkRange;
+    }
+    if (hasPendingDirtySelectionRows) {
+      this.selectionManager?.clearDirtySelectionRows();
+    }
+
     // ALWAYS clear dirty flags after rendering, regardless of forceAll.
     // This is critical - if we don't clear after a full redraw, the dirty
     // state persists and the next frame might not detect new changes properly.
@@ -548,47 +679,55 @@ export class CanvasRenderer {
   }
 
   /**
-   * Render a single line using two-pass approach:
+   * Render a row of cells using two-pass approach:
    * 1. First pass: Draw all cell backgrounds
    * 2. Second pass: Draw all cell text and decorations
    *
    * This two-pass approach is necessary for proper rendering of complex scripts
-   * like Devanagari where diacritics (like vowel sign ि) can extend LEFT of the
-   * base character into the previous cell's visual area. If we draw backgrounds
-   * and text in a single pass (cell by cell), the background of cell N would
-   * cover any left-extending portions of graphemes from cell N-1.
+   * like Devanagari where diacritics (like the vowel sign ि) can extend LEFT of
+   * the base character into the previous cell's visual area. If we draw
+   * backgrounds and text in a single pass (cell by cell), the background of
+   * cell N would cover any left-extending portions of graphemes from cell N-1.
+   *
+   * The row is addressed as cells[offset + x] so callers can paint straight
+   * out of the shared viewport pool (or a scrollback row array) without
+   * creating a per-row slice.
    */
-  private renderLine(line: GhosttyCell[], y: number, cols: number): void {
+  private renderRowCells(cells: GhosttyCell[], offset: number, y: number, cols: number): void {
     const lineY = y * this.metrics.height;
     const lineWidth = cols * this.metrics.width;
 
     // Clear line background then fill with theme color.
     // We clear just the cell area - glyph overflow is handled by also
-    // redrawing adjacent rows (see render() method).
+    // redrawing adjacent rows (see renderFrame()).
     // clearRect is needed because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
     this.ctx.clearRect(0, lineY, lineWidth, this.metrics.height);
     this.ctx.fillStyle = this.theme.background;
     this.ctx.fillRect(0, lineY, lineWidth, this.metrics.height);
 
+    const end = Math.min(offset + cols, cells.length);
+
     // PASS 1: Draw all cell backgrounds first
     // This ensures all backgrounds are painted before any text, allowing text
     // to "bleed" across cell boundaries without being covered by adjacent backgrounds
-    for (let x = 0; x < line.length; x++) {
-      const cell = line[x];
+    for (let i = offset; i < end; i++) {
+      const cell = cells[i];
       if (cell.width === 0) continue; // Skip spacer cells for wide characters
-      this.renderCellBackground(cell, x, y);
+      this.renderCellBackground(cell, i - offset, y);
     }
 
     // PASS 2: Draw all cell text and decorations
     // Now text can safely extend beyond cell boundaries (for complex scripts)
-    for (let x = 0; x < line.length; x++) {
-      const cell = line[x];
+    for (let i = offset; i < end; i++) {
+      const cell = cells[i];
       if (cell.width === 0) continue; // Skip spacer cells for wide characters
-      this.renderCellText(cell, x, y);
+      this.renderCellText(cell, i - offset, y);
     }
-  }
 
+    const c = getTerminalPerfCounters();
+    if (c) c.renderedRows++;
+  }
   /**
    * Render a cell's background only (Pass 1 of two-pass rendering)
    * Selection highlighting is integrated here to avoid z-order issues with
@@ -884,9 +1023,18 @@ export class CanvasRenderer {
   }
 
   /**
-   * Render cursor
+   * Render cursor. The block style re-draws the character under the cursor
+   * with the accent color; that cell is read from the frame's shared viewport
+   * pool when available (no per-row getLine() copy), falling back to
+   * getLine() only for buffers without pool support.
    */
-  private renderCursor(x: number, y: number): void {
+  private renderCursor(
+    buffer: IRenderable,
+    pool: GhosttyCell[] | null,
+    x: number,
+    y: number,
+    cols: number
+  ): void {
     const cursorX = x * this.metrics.width;
     const cursorY = y * this.metrics.height;
 
@@ -898,13 +1046,13 @@ export class CanvasRenderer {
         this.ctx.fillRect(cursorX, cursorY, this.metrics.width, this.metrics.height);
         // Re-draw character under cursor with cursorAccent color
         {
-          const line = this.currentBuffer?.getLine(y);
-          if (line?.[x]) {
+          const cell = pool ? pool[y * cols + x] : buffer.getLine(y)?.[x];
+          if (cell) {
             this.ctx.save();
             this.ctx.beginPath();
             this.ctx.rect(cursorX, cursorY, this.metrics.width, this.metrics.height);
             this.ctx.clip();
-            this.renderCellText(line[x], x, y, this.theme.cursorAccent);
+            this.renderCellText(cell, x, y, this.theme.cursorAccent);
             this.ctx.restore();
           }
         }
@@ -935,10 +1083,7 @@ export class CanvasRenderer {
 
   private startCursorBlink(): void {
     // xterm.js uses ~530ms blink interval
-    this.cursorBlinkInterval = window.setInterval(() => {
-      this.cursorVisible = !this.cursorVisible;
-      // Note: Render loop should redraw cursor line automatically
-    }, 530);
+    this.cursorBlinkInterval = window.setInterval(() => this.toggleCursorBlink(), 530);
   }
 
   private stopCursorBlink(): void {
@@ -946,7 +1091,18 @@ export class CanvasRenderer {
       clearInterval(this.cursorBlinkInterval);
       this.cursorBlinkInterval = undefined;
     }
+    // Restore visibility; the caller (Terminal option change) schedules the
+    // repaint that uncovers the cursor cell.
     this.cursorVisible = true;
+  }
+
+  /**
+   * Toggle cursor visibility and request a cursor-row repaint. Public
+   * visibility is not required; tests drive it to verify blink scheduling.
+   */
+  toggleCursorBlink(): void {
+    this.cursorVisible = !this.cursorVisible;
+    this.onRenderRequest?.();
   }
 
   // ==========================================================================

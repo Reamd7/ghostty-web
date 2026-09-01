@@ -5,6 +5,7 @@
  * The key optimization is the RenderState API which provides a pre-computed
  * snapshot of all render data in a single update call.
  */
+import { getTerminalPerfCounters } from './perf-counters';
 
 import {
   CellFlags,
@@ -280,6 +281,15 @@ export class GhosttyTerminal {
   private viewportBufferPtr: number = 0;
   private viewportBufferSize: number = 0;
 
+  /**
+   * Render-frame guard: when set, update() returns this cached DirtyState
+   * instead of crossing the WASM boundary again, so one synchronous render
+   * transaction performs exactly one update() call. JS is single-threaded and
+   * writes cannot interleave with a synchronous render, so the cached value
+   * is stable for the whole frame.
+   */
+  private frameDirty: DirtyState | null = null;
+
   /** Cell pool for zero-allocation rendering */
   private cellPool: GhosttyCell[] = [];
 
@@ -413,7 +423,26 @@ export class GhosttyTerminal {
    * Safe to call multiple times - dirty state persists until markClean().
    */
   update(): DirtyState {
+    if (this.frameDirty !== null) return this.frameDirty;
+    const c = getTerminalPerfCounters();
+    if (c) c.wasmUpdateCalls++;
     return this.exports.ghostty_render_state_update(this.handle) as DirtyState;
+  }
+
+  /**
+   * Begin a render frame: performs update() once and caches the result so
+   * every update()/getCursor()/needsFullRedraw()/getScrollbackLine() call
+   * inside the frame shares that single WASM boundary crossing. Pair with
+   * endFrame(); the cache never spans an asynchronous boundary.
+   */
+  beginFrame(): DirtyState {
+    if (this.frameDirty === null) this.frameDirty = this.update();
+    return this.frameDirty;
+  }
+
+  /** End the render frame started by beginFrame(). */
+  endFrame(): void {
+    this.frameDirty = null;
   }
 
   /**
@@ -460,6 +489,8 @@ export class GhosttyTerminal {
    * Check if a specific row is dirty
    */
   isRowDirty(y: number): boolean {
+    const c = getTerminalPerfCounters();
+    if (c) c.isRowDirtyCalls++;
     return this.exports.ghostty_render_state_is_row_dirty(this.handle, y);
   }
 
@@ -476,22 +507,11 @@ export class GhosttyTerminal {
    */
   getViewport(): GhosttyCell[] {
     const totalCells = this._cols * this._rows;
-    const neededSize = totalCells * GhosttyTerminal.CELL_SIZE;
-
-    // Ensure buffer is allocated
-    if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
-      if (this.viewportBufferPtr) {
-        this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
-        this.viewportBufferPtr = 0;
-        this.viewportBufferSize = 0;
-      }
-      const fresh = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
-      if (!fresh) throw new Error(`ghostty wasm viewport allocation of ${neededSize} bytes failed`);
-      this.viewportBufferPtr = fresh;
-      this.viewportBufferSize = neededSize;
+    if (!this.ensureViewportBuffer(totalCells * GhosttyTerminal.CELL_SIZE)) {
+      throw new Error('ghostty wasm viewport allocation failed');
     }
-
-    // Get all cells in one call
+    const c = getTerminalPerfCounters();
+    if (c) c.getViewportCalls++;
     const count = this.exports.ghostty_render_state_get_viewport(
       this.handle,
       this.viewportBufferPtr,
@@ -502,7 +522,50 @@ export class GhosttyTerminal {
 
     // Parse cells into pool (reuses existing objects)
     this.parseCellsIntoPool(this.viewportBufferPtr, totalCells);
+    if (c) c.viewportCellsParsed += totalCells;
     return this.cellPool;
+  }
+
+  /**
+   * In-frame viewport access for the renderer: identical extraction to
+   * getViewport(), but reports failure explicitly instead of returning a
+   * stale pool, so a failed render frame can keep its dirty state and retry.
+   *
+   * The returned pool is shared and mutable: it is only valid until the next
+   * getViewport()/getViewportPool() call, resize, or free. Read rows as
+   * pool[y * cols + x] and consume within the current synchronous frame —
+   * never hand these objects to code that outlives the frame (use getLine()
+   * for stable copies).
+   */
+  getViewportPool(): GhosttyCell[] | null {
+    const totalCells = this._cols * this._rows;
+    if (!this.ensureViewportBuffer(totalCells * GhosttyTerminal.CELL_SIZE)) return null;
+    const c = getTerminalPerfCounters();
+    if (c) c.getViewportCalls++;
+    const count = this.exports.ghostty_render_state_get_viewport(
+      this.handle,
+      this.viewportBufferPtr,
+      totalCells
+    );
+    if (count < 0) return null;
+    this.parseCellsIntoPool(this.viewportBufferPtr, totalCells);
+    if (c) c.viewportCellsParsed += totalCells;
+    return this.cellPool;
+  }
+
+  /** Allocate (or keep) the shared viewport staging buffer. False on OOM. */
+  private ensureViewportBuffer(neededSize: number): boolean {
+    if (this.viewportBufferPtr && this.viewportBufferSize >= neededSize) return true;
+    if (this.viewportBufferPtr) {
+      this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
+      this.viewportBufferPtr = 0;
+      this.viewportBufferSize = 0;
+    }
+    const fresh = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+    if (!fresh) return false;
+    this.viewportBufferPtr = fresh;
+    this.viewportBufferSize = neededSize;
+    return true;
   }
 
   // ==========================================================================
@@ -516,13 +579,17 @@ export class GhosttyTerminal {
    */
   getLine(y: number): GhosttyCell[] | null {
     if (y < 0 || y >= this._rows) return null;
+    const c = getTerminalPerfCounters();
+    if (c) c.getLineCalls++;
     // Call update() to ensure render state is fresh.
     // This is safe to call multiple times - dirty state persists until markClean().
     this.update();
     const viewport = this.getViewport();
     const start = y * this._cols;
     // Return deep copies to avoid cell pool reference issues
-    return viewport.slice(start, start + this._cols).map((cell) => ({ ...cell }));
+    const line = viewport.slice(start, start + this._cols).map((cell) => ({ ...cell }));
+    if (c) c.lineCellsCloned += line.length;
+    return line;
   }
 
   /** For compatibility with old API */
@@ -585,19 +652,11 @@ export class GhosttyTerminal {
    * @param offset 0 = oldest line, (length-1) = most recent scrollback line
    */
   getScrollbackLine(offset: number): GhosttyCell[] | null {
+    const c = getTerminalPerfCounters();
+    if (c) c.getScrollbackLineCalls++;
     const neededSize = this._cols * GhosttyTerminal.CELL_SIZE;
-
-    // Ensure buffer is allocated
-    if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
-      if (this.viewportBufferPtr) {
-        this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
-        this.viewportBufferPtr = 0;
-        this.viewportBufferSize = 0;
-      }
-      const fresh = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
-      if (!fresh) throw new Error(`ghostty wasm scrollback allocation of ${neededSize} bytes failed`);
-      this.viewportBufferPtr = fresh;
-      this.viewportBufferSize = neededSize;
+    if (!this.ensureViewportBuffer(neededSize)) {
+      throw new Error(`ghostty wasm scrollback allocation of ${neededSize} bytes failed`);
     }
 
     // Call update() to ensure render state is fresh (needed for colors).
@@ -635,6 +694,7 @@ export class GhosttyTerminal {
         grapheme_len: u8[cellOffset + 14],
       });
     }
+    if (c) c.scrollbackCellsParsed += count;
 
     return cells;
   }

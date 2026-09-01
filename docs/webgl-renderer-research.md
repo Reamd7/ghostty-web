@@ -14,26 +14,26 @@ WebGL glyph atlas 路线 = 字形预光栅化进纹理，每帧只做顶点批�
 
 **先回答两个架构问题（调研结论）**：
 
-- *把渲染业务全搬 wasm？* 对 Canvas 2D 不做——绘制 API 只在 JS 侧，wasm
+- _把渲染业务全搬 wasm？_ 对 Canvas 2D 不做——绘制 API 只在 JS 侧，wasm
   化后每条绘制指令要 wasm→JS 反向跨界，帧时间更差。**边界修正（见 §2.5
   beamterm）**：在 WebGL 下"渲染器整体 wasm 化"没有此障碍（wgpu 直接驱动
   GPU），是真实可行的路线，但代价是引入 Rust 工具链；本 fork 已有 TS 渲染
   契约与测试，不走此路。wasm 侧生成顶点 buffer 的收益（省一次快照拷贝）
   在 R1 后仅 ~30KB/帧，不值得。
-- *直接用 @xterm/addon-webgl？* 不可能，见 §3。
+- _直接用 @xterm/addon-webgl？_ 不可能，见 §3。
 
 ## 2. 业界参照：xterm.js addon-webgl 架构
 
 源码 `xterm.js/addons/addon-webgl/src`，约 130KB TypeScript：
 
-| 模块 | 规模 | 职责 |
-|---|---|---|
-| `TextureAtlas.ts` | 49KB | 字形→纹理缓存（本方案核心参照） |
-| `WebglRenderer.ts` | 32KB | 帧调度、图层编排（rect→glyph→overlay） |
-| `GlyphRenderer.ts` | 18KB | 字形 quad 顶点生成与提交 |
-| `RectangleRenderer.ts` | 14KB | 背景/选区矩形批量绘制 |
-| `CellColorResolver.ts` | 10KB | cell 颜色解析（含对比度调整） |
-| `customGlyphs/` + `renderLayer/` | ~10KB | powerline/box 字形像素绘制、光标层 |
+| 模块                             | 规模  | 职责                                   |
+| -------------------------------- | ----- | -------------------------------------- |
+| `TextureAtlas.ts`                | 49KB  | 字形→纹理缓存（本方案核心参照）        |
+| `WebglRenderer.ts`               | 32KB  | 帧调度、图层编排（rect→glyph→overlay） |
+| `GlyphRenderer.ts`               | 18KB  | 字形 quad 顶点生成与提交               |
+| `RectangleRenderer.ts`           | 14KB  | 背景/选区矩形批量绘制                  |
+| `CellColorResolver.ts`           | 10KB  | cell 颜色解析（含对比度调整）          |
+| `customGlyphs/` + `renderLayer/` | ~10KB | powerline/box 字形像素绘制、光标层     |
 
 ### TextureAtlas 关键设计（可直接借鉴）
 
@@ -143,12 +143,12 @@ lib/renderers/
 
 ### 相对 addon-webgl 的简化机会
 
-| addon-webgl 复杂度来源 | fork 情况 |
-|---|---|
-| CellColorResolver（对比度动态调整、最小对比度主题） | fork 主题色已在上游解析成 RGB，直接用 |
-| customGlyphs（powerline/box drawing 像素绘制） | fork 用 Nerd Font，字形本身存在，先走普通光栅化，像素绘制仅作 fallback |
-| decoration service / underline 变体 8 种 | fork flags 里有 underline/dim/inverse，先支持现有集 |
-| LRU 页合并/驱逐（多主题多字号并存） | fork 每终端一个渲染器、主题/字号变更即全失效重建，单页起步 + 逐页增长足够 |
+| addon-webgl 复杂度来源                              | fork 情况                                                                 |
+| --------------------------------------------------- | ------------------------------------------------------------------------- |
+| CellColorResolver（对比度动态调整、最小对比度主题） | fork 主题色已在上游解析成 RGB，直接用                                     |
+| customGlyphs（powerline/box drawing 像素绘制）      | fork 用 Nerd Font，字形本身存在，先走普通光栅化，像素绘制仅作 fallback    |
+| decoration service / underline 变体 8 种            | fork flags 里有 underline/dim/inverse，先支持现有集                       |
+| LRU 页合并/驱逐（多主题多字号并存）                 | fork 每终端一个渲染器、主题/字号变更即全失效重建，单页起步 + 逐页增长足够 |
 
 atlas 缓存键：`(codepoint, fgRGB, bgRGB, flags)`——与四键等价，
 `GhosttyCell` 16 字节结构比 xterm 位域更好拆。

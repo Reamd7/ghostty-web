@@ -23,6 +23,12 @@ export declare class CanvasRenderer {
     private previousHoveredHyperlinkId;
     private hoveredLinkRange;
     private previousHoveredLinkRange;
+    /**
+     * Repaint request hook for state changes that originate inside the
+     * renderer (cursor blink toggle, blink-stop cursor restore). Wired by
+     * Terminal to its on-demand render scheduler.
+     */
+    onRenderRequest: (() => void) | null;
     constructor(canvas: HTMLCanvasElement, options?: RendererOptions);
     private measureFont;
     /**
@@ -39,17 +45,34 @@ export declare class CanvasRenderer {
      */
     render(buffer: IRenderable, forceAll?: boolean, viewportY?: number, scrollbackProvider?: IScrollbackProvider, scrollbarOpacity?: number): void;
     /**
-     * Render a single line using two-pass approach:
+     * One render frame.
+     *
+     * Screen rows are read from a single shared viewport pool (fetched lazily,
+     * at most once per frame) instead of per-row getLine() copies. Scrollback
+     * rows still come from the scrollback provider — they are not part of the
+     * active-screen pool.
+     *
+     * If the viewport pool cannot be fetched, the frame aborts WITHOUT
+     * clearing dirty state so the next frame retries instead of silently
+     * dropping the update.
+     */
+    private renderFrame;
+    /**
+     * Render a row of cells using two-pass approach:
      * 1. First pass: Draw all cell backgrounds
      * 2. Second pass: Draw all cell text and decorations
      *
      * This two-pass approach is necessary for proper rendering of complex scripts
-     * like Devanagari where diacritics (like vowel sign ि) can extend LEFT of the
-     * base character into the previous cell's visual area. If we draw backgrounds
-     * and text in a single pass (cell by cell), the background of cell N would
-     * cover any left-extending portions of graphemes from cell N-1.
+     * like Devanagari where diacritics (like the vowel sign ि) can extend LEFT of
+     * the base character into the previous cell's visual area. If we draw
+     * backgrounds and text in a single pass (cell by cell), the background of
+     * cell N would cover any left-extending portions of graphemes from cell N-1.
+     *
+     * The row is addressed as cells[offset + x] so callers can paint straight
+     * out of the shared viewport pool (or a scrollback row array) without
+     * creating a per-row slice.
      */
-    private renderLine;
+    private renderRowCells;
     /**
      * Render a cell's background only (Pass 1 of two-pass rendering)
      * Selection highlighting is integrated here to avoid z-order issues with
@@ -69,11 +92,19 @@ export declare class CanvasRenderer {
      */
     private renderBlockChar;
     /**
-     * Render cursor
+     * Render cursor. The block style re-draws the character under the cursor
+     * with the accent color; that cell is read from the frame's shared viewport
+     * pool when available (no per-row getLine() copy), falling back to
+     * getLine() only for buffers without pool support.
      */
     private renderCursor;
     private startCursorBlink;
     private stopCursorBlink;
+    /**
+     * Toggle cursor visibility and request a cursor-row repaint. Public
+     * visibility is not required; tests drive it to verify blink scheduling.
+     */
+    toggleCursorBlink(): void;
     /**
      * Update theme colors
      */
@@ -291,6 +322,14 @@ export declare class GhosttyTerminal {
     /** Reusable buffer for viewport operations */
     private viewportBufferPtr;
     private viewportBufferSize;
+    /**
+     * Render-frame guard: when set, update() returns this cached DirtyState
+     * instead of crossing the WASM boundary again, so one synchronous render
+     * transaction performs exactly one update() call. JS is single-threaded and
+     * writes cannot interleave with a synchronous render, so the cached value
+     * is stable for the whole frame.
+     */
+    private frameDirty;
     /** Cell pool for zero-allocation rendering */
     private cellPool;
     constructor(exports: GhosttyWasmExports, memory: WebAssembly.Memory, cols?: number, rows?: number, config?: GhosttyTerminalConfig);
@@ -321,6 +360,15 @@ export declare class GhosttyTerminal {
      */
     update(): DirtyState;
     /**
+     * Begin a render frame: performs update() once and caches the result so
+     * every update()/getCursor()/needsFullRedraw()/getScrollbackLine() call
+     * inside the frame shares that single WASM boundary crossing. Pair with
+     * endFrame(); the cache never spans an asynchronous boundary.
+     */
+    beginFrame(): DirtyState;
+    /** End the render frame started by beginFrame(). */
+    endFrame(): void;
+    /**
      * Get cursor state from render state.
      * Ensures render state is fresh by calling update().
      */
@@ -342,6 +390,20 @@ export declare class GhosttyTerminal {
      * Returns a reusable cell array (zero allocation after warmup).
      */
     getViewport(): GhosttyCell[];
+    /**
+     * In-frame viewport access for the renderer: identical extraction to
+     * getViewport(), but reports failure explicitly instead of returning a
+     * stale pool, so a failed render frame can keep its dirty state and retry.
+     *
+     * The returned pool is shared and mutable: it is only valid until the next
+     * getViewport()/getViewportPool() call, resize, or free. Read rows as
+     * pool[y * cols + x] and consume within the current synchronous frame —
+     * never hand these objects to code that outlives the frame (use getLine()
+     * for stable copies).
+     */
+    getViewportPool(): GhosttyCell[] | null;
+    /** Allocate (or keep) the shared viewport staging buffer. False on OOM. */
+    private ensureViewportBuffer;
     /**
      * Get line - for compatibility, extracts from viewport.
      * Ensures render state is fresh by calling update().
@@ -949,6 +1011,19 @@ export declare interface IRenderable {
     isRowDirty(y: number): boolean;
     /** Returns true if a full redraw is needed (e.g., screen change) */
     needsFullRedraw?(): boolean;
+    /**
+     * Render-frame fast path. beginFrame() performs at most one WASM update()
+     * and caches it for the whole synchronous transaction; every update()/
+     * getCursor()/needsFullRedraw() call between begin/end shares that call.
+     */
+    beginFrame?(): number;
+    endFrame?(): void;
+    /**
+     * In-frame shared viewport pool (read rows as pool[y * cols + x]). Valid
+     * only until the next viewport extraction. Returns null on extraction
+     * failure — the renderer then aborts without clearing dirty state.
+     */
+    getViewportPool?(): GhosttyCell[] | null;
     clearDirty(): void;
     /**
      * Get the full grapheme string for a cell at (row, col).
@@ -1682,7 +1757,11 @@ export declare class SelectionManager {
      */
     private copyWithExecCommand;
     /**
-     * Request a render update (triggers selection overlay redraw)
+     * Request a render update (triggers selection overlay redraw).
+     * Selection changes invalidate rows on their own — without this the
+     * terminal has no permanent render loop that would pick them up.
+     * clearSelection() additionally marks affected rows in dirtySelectionRows
+     * so the renderer repaints the cleared overlay.
      */
     private requestRender;
 }
@@ -1731,9 +1810,12 @@ export declare class Terminal implements ITerminalCore {
     readonly onCursorMove: IEvent<void>;
     private isOpen;
     private isDisposed;
-    private animationFrameId?;
+    /** Pending on-demand render frame (coalesced: at most one rAF at a time). */
+    private renderFramePending;
+    private renderFrameId?;
+    /** Write callbacks, flushed after the render that includes their write. */
+    private writeCallbacks;
     private writeQueue;
-    private awaitingEcho;
     private addons;
     private customKeyEventHandler?;
     private currentTitle;
@@ -1930,17 +2012,32 @@ export declare class Terminal implements ITerminalCore {
      */
     dispose(): void;
     /**
-     * Cancel the render loop
+     * Cancel a pending scheduled render frame (dispose, resize).
      */
-    private cancelRenderLoop;
+    private cancelScheduledRender;
     /**
      * Flush any writes that were queued during resize
      */
     private flushWriteQueue;
     /**
-     * Start the render loop
+     * Request a render on the next animation frame.
+     *
+     * The single coalescing entry point for every visual change: writes,
+     * selection updates, link hover, scrolling, cursor blink, scrollbar fade,
+     * and option changes. Multiple requests within one event-loop turn share
+     * one pending frame; an idle terminal with no invalidation keeps no
+     * animation frame alive.
      */
-    private startRenderLoop;
+    scheduleRender(): void;
+    /**
+     * Execute one render transaction: a single WASM update() frame (cached
+     * across the draw), the cursor-move event, and write callbacks in order.
+     * Exposed indirectly for tests via private access; production callers go
+     * through scheduleRender().
+     */
+    private runRenderTransaction;
+    /** Run pending write callbacks (after the render containing their write). */
+    private flushWriteCallbacks;
     /**
      * Get a line from native WASM scrollback buffer
      * Implements IScrollbackProvider
@@ -2009,11 +2106,13 @@ export declare class Terminal implements ITerminalCore {
      */
     private hideScrollbar;
     /**
-     * Fade in scrollbar
+     * Fade in scrollbar. The animation only advances opacity state; drawing
+     * goes through the unified scheduler.
      */
     private fadeInScrollbar;
     /**
-     * Fade out scrollbar
+     * Fade out scrollbar. The animation only advances opacity state; drawing
+     * goes through the unified scheduler.
      */
     private fadeOutScrollbar;
     /**
