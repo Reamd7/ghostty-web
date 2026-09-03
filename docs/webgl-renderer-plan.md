@@ -54,6 +54,29 @@ RectangleRenderer 386 / TextureAtlas 1206 / WebglRenderer 768）：
 
 B 循环是关卡：每个 M 的验收 = `__diff()` 在容差内（默认每像素 ΔRGB≤8、
 mismatch ≤0.5%），失败时 demo 页并排渲染 + 差异热图，肉眼定位。
+
+## 进度（2026-09-04，M0-M5 已落地）
+
+| 里程碑 | 状态 | 验收证据 |
+|---|---|---|
+| M0 验证循环 | ✅ | demo/webgl-check.{html,js}；自证模式 4 场景零差；抓过两个真 bug（vite 静态解析、R1 双渲染器 abort） |
+| M1 rect 管线 | ✅ | s1_bg 背景场景逐位一致（maxDiff=0） |
+| M2 atlas | ✅ | 随 M3 验收；缓存键 (text,bold,italic)，槽位 LRU |
+| M3 glyph pass | ✅ | 4 场景全过（tol16/pct≤2/mean≤1.5）：s1 0 / s2 1.75 / s3 0.19 / s4 0.55（%） |
+| M4 叠加层 | ✅ | hover 下划线（OSC8+regex）；光标三式+accent、选区、滚动条、shader 画线自 M1-M3 递进 |
+| M5 集成+降级 | ✅ | Terminal renderer:'auto' 默认走 WebGL（真 PTY demo 会话验证）；降级路径代码审阅级 |
+| M6 基准 | ⬜ | bench/versus.ts 对照 + profile:terminal 数字（合入门禁数据） |
+
+**已知残差**（验收口径内，记录在案）：
+- bold 字形 AA 相位差（atlas 光栅化 vs 直绘 fillText）——纹理路径本质属性，addon-webgl 同样存在；
+- italic 溢出靠 1+2px gutter 近似（canvas 直绘无裁剪概念）；
+- shader 画线（smoothstep）vs canvas stroke 的 1px 边缘形状差。
+
+**验证待办**：真机交互矩阵（拖选手感/hover 命中/滚动跟手性）；--disable-webgl 降级实测；M6 基准。
+
+**实现要点备忘**：blend 开关曾丢失（quad 替换背景的经典症状=字形区全黑/透明）；
+垂直 gutter 引入后装饰 uv 必须重新归一到 cell 盒。
+
 ## 里程碑
 ```
 M0 → M1 → M2 → M3 → M4 → M5 → M6   （严格串行；M0 = 验证循环载体，
