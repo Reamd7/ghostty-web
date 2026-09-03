@@ -95,6 +95,13 @@ VS Code 数百万日活验证了它的正确性边界与降级策略。
 `auto` 降级链（webgl → canvas 回退 + FPS 探测缓存）应作为本方案验收
 标准的一部分直接采纳。
 
+**持续风险注脚（2026-09-02 补，详见 `docs/webgpu-renderer-research.md`
+§3）**：业界默认方案自身也在付 GPU bug 税——Safari 26.5 beta 曾完全
+弄坏 WebGL 渲染（xterm.js #5816，商业终端 webssh.net 为此对 OS ≥26.5
+回退 Canvas 渲染器）；addon-webgl 的 atlas 页合并腐化（#5847，
+glyph 替换/丢字形）在 Electron 43 / Windows Chrome 同样确定性复现且
+未修净。auto 降级链因此是生存必需，不是优化项。
+
 ## 3. 为什么 `@xterm/addon-webgl` 不能直接用于 ghostty-web
 
 ghostty-web 的 xterm.js 兼容是**公共 API 表面**（`ITerminalCore` 仅

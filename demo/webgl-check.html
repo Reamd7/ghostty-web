@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WebGL vs Canvas visual check</title>
+    <!--
+      Independent verification loop (webgl-renderer-plan.md §0.6, loop B).
+
+      Renders one shared WASM terminal through two renderer instances
+      (left: CanvasRenderer reference, right: WebGLRenderer candidate),
+      fed by a hardcoded VT byte stream, then reports per-pixel diff via
+      window.__diff(). Headless friendly: no PTY, no interaction required.
+
+      Self-check: ?self=1 diffs the SAME renderer type on both panes; the
+      loop must report zero mismatch before its verdict on WebGL can be
+      trusted.
+    -->
+    <style>
+      body { margin: 0; background: #0f172a; font-family: monospace; color: #cbd5e1; }
+      .row { display: flex; gap: 12px; padding: 12px; }
+      .pane { flex: 0 0 auto; }
+      .pane h3 { margin: 0 0 6px; font-size: 12px; font-weight: normal; }
+      canvas { display: block; outline: 1px solid #334155; }
+      #status { padding: 8px 12px; font-size: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="status">loading…</div>
+    <div class="row">
+      <div class="pane">
+        <h3>canvas2d (reference)</h3>
+        <canvas id="c-ref"></canvas>
+      </div>
+      <div class="pane">
+        <h3 id="gl-title">webgl (candidate)</h3>
+        <canvas id="c-gl"></canvas>
+      </div>
+    </div>
+    <script type="module" src="./webgl-check.js"></script>
+  </body>
+</html>

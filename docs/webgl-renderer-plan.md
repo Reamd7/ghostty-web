@@ -1,25 +1,71 @@
 # 计划：WebGL 渲染器实现（分支 `webgl-renderer`）
 
-> 依据：`docs/webgl-renderer-research.md`（调研已定案：WebGL1 起步、
-> 自有契约注入、atlas 借鉴 addon-webgl、auto 降级链）。
+> 依据：`docs/webgl-renderer-research.md`、`docs/beamterm-research.md`、
+> `docs/web-terminal-landscape.md`（调研已定案：**WebGL2**、自有契约注入、
+> beamterm 8B/cell instanced 布局 + ferroterm 脏行组织、auto 降级链）。
 > 本分支为实验线；合入 `terminal-enhancer` 仍受主仓
 > PLAN-terminal-render-perf.md §决策门约束（R1-R3 + 基线数据）。
-
+> **实现原则（2026-09-04 补）**：(1) 参考 addon-webgl 真实源码逐模块对照，
+> 不空想；(2) 每个里程碑有独立验证循环，完成即可证，不靠最后总验。
 ## 0. 关键架构决策（开工前锁定）
 
-| 决策       | 选择                                                                                                              | 理由                                                                     |
-| ---------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| GL 版本    | **WebGL1**（+ `ANGLE_instanced_arrays`/`OES_texture_float` 按需）                                                 | addon-webgl 验证过的路径，shader 可参照；兼容面最大；WebGL2 升级留作后续 |
-| 与 R1 关系 | `WebGLRenderer.render()` **原生按 R1 形状写**：入口一次 `update()+getViewport()`，行循环读快照切片                | 新代码直接写成正确形状，不等 CanvasRenderer 重构                         |
-| 渲染器选择 | `Terminal` 构造参数 `renderer?: 'canvas' \| 'webgl' \| 'auto'`（默认 `auto`：webgl 优先，失败降级 canvas 并缓存） | 采纳 VS Code `gpuAcceleration` 语义                                      |
-| 文件布局   | 新增 `lib/renderers/webgl/`；**不移动** `lib/renderer.ts`（CanvasRenderer）                                       | 最小扰动，回退路径零风险                                                 |
-| 顶点提交   | 每 cell 一个 quad，`Float32Array` 预分配 + `bufferSubData` 增量上传                                               | addon-webgl 同款；容量 = cols×rows 上限预分配                            |
-| 字体度量   | 复用现有 `FontMetrics` / `measureFont` 逻辑——GL 与 Canvas 2D **必须同一套**                                       | selection/link 的 `pixelToCell` 依赖渲染几何一致                         |
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| GL 版本 | **WebGL2**（`#version 300 es`，integer attribute + `sampler2DArray`） | beamterm/ferroterm 双验证；instanced integer attribute 是 8B/cell 布局的前提；旧设备走 auto→canvas 降级 |
+| 与 R1 关系 | `WebGLRenderer.render()` **原生按 R1 形状写**：`beginFrame()` 单跨界 + `getViewportPool()` 行切片 | R1 已落地（`33c235f`），直接消费 frameDirty + pool |
+| 顶点提交 | **8B/cell**：`a_pos uvec2(x, y|wide<<16)` + `a_data uvec2(glyphId:16\|flags:4\|fgR/fgG, fgB\|bg RGBA8)`，单静态 quad + `drawElementsInstanced` | beamterm 布局（vs addon-webgl 11 floats=44B/cell）；颜色 vertex 侧解包 `flat out`，位移 GPU 侧 `floor(pos*cellSize+0.5)` 像素对齐（两处 ANGLE 对策） |
+| 纹理组织 | `sampler2DArray` RGBA8，槽位 `(2·cellW+2)×(cellH+2)`（pad 1px），槽内寻址全 shader | vs addon-webgl 的 N 张独立纹理 + frag 动态分支（受 MAX_TEXTURE_IMAGE_UNITS≈32 页上限）；z 层索引无上限 |
+| 缓存键 | `(text, bold, italic)`——**白字光栅化取 alpha，fg 在 instance 里乘**；emoji 彩色自动检测置位 | vs addon-webgl `FourKeyMap(code, bg, fg, ext)` 颜色烘焙键（条目数 ×颜色数）；下划线/删除线进 instance flags 位 shader 画线，不进键 |
+| buffer 管理 | 持久 instance buffer + 脏行范围 `bufferSubData`（ferroterm）+ 双缓冲 attributesBuffers 轮换（addon-webgl） | 脏行 = 渲染循环已算出的集合，行内 instance 下标连续 |
+| 渲染器选择 | `Terminal` 构造参数 `renderer?: 'canvas' \| 'webgl' \| 'auto'`（默认 `auto`） | VS Code `gpuAcceleration` 语义 |
+| 文件布局 | 新增 `lib/renderers/webgl/`；不移动 `lib/renderer.ts` | 回退路径零风险 |
+| 字体度量 | 提取共享 `measureFontMetrics()`（CanvasRenderer 改为委托） | selection/link 的 `pixelToCell` 依赖几何一致；单一事实源 |
 
+## 0.5 addon-webgl 源码对照结论（参考已研读，MIT，xterm.js master）
+
+已逐模块研读 `addons/addon-webgl/src`（GlyphRenderer 421 行 /
+RectangleRenderer 386 / TextureAtlas 1206 / WebglRenderer 768）：
+
+**直接采纳**（工程细节，照抄语义）：
+- 单位 quad `[0,0, 1,0, 0,1, 1,1]` + `drawElementsInstanced(TRIANGLE_STRIP, 4, UNSIGNED_BYTE)`
+- rect pass 属性 `position(2)+size(2)+color(4)` = 8 floats/rect，**run-length 合并**同色背景（`(endX-startX)*cellWidth` 一条矩形）
+- 背景→字形→光标 三段绘制顺序；光标独立顶点集；viewport 底色矩形
+- `beginFrame()` 返回 atlas 页布局是否变化 → 上层决定全量重建 model（`pageLayoutVersion` 协议）
+- 双缓冲 `attributesBuffers[2]`（GPU 占用中不可改 buffer）
+- ASCII 33–126 warmUp 预热；1×1 红像素哨兵纹理（无效页画红块，调试）
+- blend `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`；`PROJECTION_MATRIX` 常量
+- context loss：`preventDefault` + 等待 restored（数秒超时）→ `onContextLoss` 事件交上层决策（VS Code 切 canvas 渲染器）
+
+**有意偏离**（beamterm 已验证的更优布局，见调研文档）：
+- 44B/cell（11 floats CPU 展开）→ 8B/cell（2×uint32 位域，GPU 侧展开）
+- N 张独立 `sampler2D` + frag 动态分支选页 → `sampler2DArray` z 层
+- 颜色烘焙缓存键（每 fg 色一个纹理条目）→ 白字 alpha + shader 乘色
+- 页合并（4 页→2× 大页的 AtlasPage 管线）→ 槽位固定、texStorage3D、
+  满则重建更大纹理（fork 单渲染器单字号，简单优先）
+
+## 0.6 独立验证循环（每个里程碑完成即自证）
+
+| 循环 | 载体 | 验证内容 | 何时跑 |
+|---|---|---|---|
+| **A 单元** | `lib/renderers/webgl/*.test.ts`，mock `WebGL2RenderingContext`（记录调用序列的 stub） | atlas 槽位数学/分配/驱逐、instance 位域打包、run-length 合并、缓存键 | 每模块完成，`bun test` 秒级 |
+| **B 视觉** | `demo/webgl-check.html`：同页两个 canvas（CanvasRenderer + WebGLRenderer）喂**硬编码 VT 字节流**，`window.__diff()` 返回逐像素 `{maxDiff, meanDiff, mismatch}` | M1 背景色块 / M3 全量文本（ASCII+CJK+emoji+block+样式）/ M4 叠加层 | 每里程碑，browser 工具 headless 调 `__diff()` 拿数字 |
+| **C 契约** | 两渲染器同输入：`getMetrics()` 相等、`resize()` 后 canvas 尺寸/DPR 一致 | 契约面 | M5 |
+| **D 集成** | `bun run demo`（vite + 真 PTY）+ browser 交互 | 输入/滚动/选择/blink 实况 | M5 后 |
+
+B 循环是关卡：每个 M 的验收 = `__diff()` 在容差内（默认每像素 ΔRGB≤8、
+mismatch ≤0.5%），失败时 demo 页并排渲染 + 差异热图，肉眼定位。
 ## 里程碑
+```
+M0 → M1 → M2 → M3 → M4 → M5 → M6   （严格串行；M0 = 验证循环载体，
+每步以 B 循环像素 diff 关卡，A 循环单测随模块走）
+```
 
-### M1 — GL 上下文与 rect pass（管线打通）
+M0 先于一切实现：没有可重复的 `__diff()` 数字，任何 GL 代码都不可判。
+M1-M3 期间 demo 页验证；M5 起接主仓 dev server E2E。
 
+<!-- 旧顺序段废弃 -->
+<!-- M1 → M2 → M3 → M4 → M5 → M6     （严格串行，每步以视觉 diff 关卡） -->
+<!-- M1-M3 期间 demo 页手工验证；M5 起接主仓 dev server E2E。 -->
 `lib/renderers/webgl/context.ts`：
 
 - `GLContext` 封装：canvas 获取 `webgl` 上下文（`alpha:false, premultipliedAlpha:true`）

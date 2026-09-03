@@ -3,7 +3,9 @@
 > 状态：调研完成。触发问题："业界有没有性能更好的 wgpu 方案？有没有
 > 没有 wasm 跨界拷贝问题的方案？"
 > 前置阅读：`docs/webgl-renderer-research.md`（xterm.js 系）、
-> `docs/beamterm-research.md`（instanced 布局）。本文补齐其余方案空间。
+> `docs/beamterm-research.md`（instanced 布局）、
+> `docs/webgpu-renderer-research.md`（原生 WebGPU API 路线，2026-09-02
+> 补齐——wgpu 库之外的第三种"wgpu 方案"）。本文补齐其余方案空间。
 > 数据核实日期：2026-09-01。
 
 ## 1. 方案矩阵（全部源码/文档核实）
@@ -39,6 +41,11 @@ ttyd/wetty/electerm/Tabby/Hyper/Wave（全部 xterm.js 壳，无独立渲染器�
 - **结论：wgpu 对本 fork 无增量价值——我们的管线复杂度恰恰在 wgpu
   抽象不掉的地方（脏行协议、atlas 生命周期、DPR 对齐）。beamterm 式
   手写 WebGL2 是该问题域的正确工具，ferroterm 用行动投了同样的票。**
+
+（"原生 WebGPU API 直写渲染器"是第三种路线，不在本节否决范围内——
+另文深读：`docs/webgpu-renderer-research.md`，结论：维持 WebGL2 起步，
+以后端隔离不变量 + 三个升级触发器（FF-Linux 发布 / Apple WebGL 退化 /
+xterm.js 落地 WebGPU）预留未来 tier。）
 
 ### Q2：有没有没有 wasm 拷贝问题的方案？
 
@@ -193,15 +200,15 @@ Williams 状态机，from-scratch，非 fork）+ wasm + JS 双渲染器，覆盖
 
 ### 7.1 全矩阵
 
-| core | 锤炼程度 | wasm 现状 | kitty keyboard | inline images | 状态 |
-|---|---|---|---|---|---|
-| **@xterm/headless 6.0** | VS Code 十年 | 不需要（纯 TS） | ✓（5.5 起） | ✗ | 活跃 |
-| **alacritty_terminal 0.26** | Alacritty（2017–） | 无先例，估 2-4k 行桥接 | ✓ | ✗ | 活跃（2026-04） |
-| termwiz 0.23 | WezTerm | 无先例 | ✓ | ✓ sixel/iTerm2 | 缓慢 |
-| **libghostty（官方 wasm）** | ghostty 本体 | **官方计划，未发布** | ✓ | ✓ kitty | alpha |
-| vt100 0.16 / avt 0.18 | headless 工具/TUI | 无 | ✗ | ✗ | 维护中 |
-| ferroterm | ~1 个月 | ✓ 现成 | ✗ | ✓ | 活跃 |
-| ghostty-vt（本 fork） | fork 自 coder/ghostty-web，已提升 1.3.1 | ✓ 现成 | ✓ | ✗ | 自维护 |
+| core                        | 锤炼程度                                | wasm 现状              | kitty keyboard | inline images  | 状态            |
+| --------------------------- | --------------------------------------- | ---------------------- | -------------- | -------------- | --------------- |
+| **@xterm/headless 6.0**     | VS Code 十年                            | 不需要（纯 TS）        | ✓（5.5 起）    | ✗              | 活跃            |
+| **alacritty_terminal 0.26** | Alacritty（2017–）                      | 无先例，估 2-4k 行桥接 | ✓              | ✗              | 活跃（2026-04） |
+| termwiz 0.23                | WezTerm                                 | 无先例                 | ✓              | ✓ sixel/iTerm2 | 缓慢            |
+| **libghostty（官方 wasm）** | ghostty 本体                            | **官方计划，未发布**   | ✓              | ✓ kitty        | alpha           |
+| vt100 0.16 / avt 0.18       | headless 工具/TUI                       | 无                     | ✗              | ✗              | 维护中          |
+| ferroterm                   | ~1 个月                                 | ✓ 现成                 | ✗              | ✓              | 活跃            |
+| ghostty-vt（本 fork）       | fork 自 coder/ghostty-web，已提升 1.3.1 | ✓ 现成                 | ✓              | ✗              | 自维护          |
 
 ### 7.2 @xterm/headless——被我们框架忽视的答案
 
@@ -239,21 +246,21 @@ E2E 多 tab 未复现——大概率已越过，但**未定向验证**。列为�
 "更成熟的"存在（xterm.js headless、alacritty_terminal），但它们让
 "换"的理由更弱而非更强——成熟度维度我们已持有锤炼过的 Zig core +
 自有 patch 层。core 迁移的真实触发器收敛为两个：
+
 1. **功能缺口**：inline images / 原生 OSC 133 blocks 成为需求；
 2. **libghostty 官方 wasm 发布**（届时它同时是"最成熟 + 官方 + 现成
    wasm"，可能连 xterm.js 都采用它——那是值得重新评估整个底座的时点）。
-
 
 ### 7.6 长尾穷尽（2026-09-01 复核）
 
 上一轮矩阵漏了 **hterm** 与三个长尾，此处补全并终结本问题：
 
-| 方案 | 状态 | 判定 |
-|---|---|---|
+| 方案                          | 状态                                                                                                                                                                         | 判定                                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | **hterm（Chromium libapps）** | GitHub 镜像 2022 停更，真身在 chromium.googlesource 活跃；**Chrome OS crosh + Blink Shell（iOS 最强终端，6919 星）双生产用户**，Blink 官方自述"simply used Chromium's HTerm" | Google 级锤炼，但 DOM 渲染、无 GPU 路径、Closure 风格古老 API——对本 fork 的 GPU 方向无可取内容 |
-| textual-web | 1462 星，2024-08 停更 1 年 | TUI 框架 web 化（同 ratzilla 定位），非 VT 终端 |
-| asciinema-player | 2920 星，活跃（2026-08） | 录制/直播**播放器**，VT 解析只读、无输入编码无 PTY 协议，不能作 core |
-| Blink Shell | 6919 星，活跃 | 终端引擎即 hterm（上表），无独立渲染器可借 |
+| textual-web                   | 1462 星，2024-08 停更 1 年                                                                                                                                                   | TUI 框架 web 化（同 ratzilla 定位），非 VT 终端                                                |
+| asciinema-player              | 2920 星，活跃（2026-08）                                                                                                                                                     | 录制/直播**播放器**，VT 解析只读、无输入编码无 PTY 协议，不能作 core                           |
+| Blink Shell                   | 6919 星，活跃                                                                                                                                                                | 终端引擎即 hterm（上表），无独立渲染器可借                                                     |
 
 ### 7.7 终极结论：成熟 + GPU 渲染的组合在 web 上不存在现成品
 

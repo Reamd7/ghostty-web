@@ -13,8 +13,8 @@
 
 import type { ITheme } from './interfaces';
 import { getTerminalPerfCounters } from './perf-counters';
-import type { SelectionManager } from './selection-manager';
-import type { GhosttyCell, ILink } from './types';
+import { measureFontMetrics } from './font-metrics';
+export type { FontMetrics } from './font-metrics';
 import { CellFlags, DirtyState } from './types';
 
 // Interface for objects that can be rendered
@@ -77,12 +77,7 @@ export interface RendererOptions {
   devicePixelRatio?: number; // Default: window.devicePixelRatio
 }
 
-export interface FontMetrics {
-  width: number; // Character cell width in CSS pixels
-  height: number; // Character cell height in CSS pixels
-  baseline: number; // Distance from top to text baseline
-}
-
+import type { FontMetrics } from './font-metrics';
 // ============================================================================
 // Default Theme
 // ============================================================================
@@ -258,52 +253,14 @@ export class CanvasRenderer {
   // ==========================================================================
 
   private measureFont(): FontMetrics {
-    // Use an offscreen canvas for measurement
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d')!;
-
-    // Set font (use actual pixel size and the regular weight for accurate
-    // measurement — cell width must be measured at the weight we draw with).
-    ctx.font =
-      this.fontWeight !== undefined
-        ? `${this.fontWeight} ${this.fontSize}px ${this.fontFamily}`
-        : `${this.fontSize}px ${this.fontFamily}`;
-
-    // Measure width using 'M' (typically widest character)
-    const widthMetrics = ctx.measureText('M');
-    const width = Math.ceil(widthMetrics.width);
-
-    // Line-box metrics must come from the FONT-wide bounding box, not the
-    // 'M' glyph's actual bounding box: CJK and box-drawing glyphs are much
-    // taller than 'M', and baselines derived from 'M' clip their tops at
-    // the canvas edge (row 0 renders with its upper pixels cut off).
-    const fontAscent =
-      widthMetrics.fontBoundingBoxAscent ||
-      widthMetrics.actualBoundingBoxAscent ||
-      this.fontSize * 0.8;
-    const fontDescent =
-      widthMetrics.fontBoundingBoxDescent ||
-      widthMetrics.actualBoundingBoxDescent ||
-      this.fontSize * 0.2;
-
-    if (this.lineHeightMultiplier !== undefined) {
-      // Explicit line height: scale the font box, baseline follows the
-      // scaled font ascent so no glyph in the font can cross the cell top.
-      const height = Math.ceil((fontAscent + fontDescent) * this.lineHeightMultiplier);
-      const baseline = Math.ceil(fontAscent * this.lineHeightMultiplier);
-      return { width, height, baseline };
-    }
-
-    // Legacy default: 'M'-glyph box + 2px padding (unchanged behavior).
-    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
-    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
-
-    // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
-    // and anti-aliasing pixels
-    const height = Math.ceil(ascent + descent) + 2;
-    const baseline = Math.ceil(ascent) + 1; // Offset baseline by half the padding
-
-    return { width, height, baseline };
+    // Delegates to the shared implementation so Canvas and WebGL renderers
+    // derive identical geometry from identical options.
+    return measureFontMetrics({
+      fontSize: this.fontSize,
+      fontFamily: this.fontFamily,
+      fontWeight: this.fontWeight,
+      lineHeight: this.lineHeightMultiplier,
+    });
   }
 
   /**
