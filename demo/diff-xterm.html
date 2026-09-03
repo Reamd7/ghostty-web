@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Differential test: xterm.js vs ghostty-vt</title>
+    <!--
+      Differential alignment check: feed identical VT byte streams to
+      @xterm/headless and ghostty-vt, then compare final grid state
+      cell-by-cell (char / fg / bg / flags). This is the empirical answer
+      to "is the current approach aligned with xterm.js" — not an API
+      shape argument, actual behavior.
+    -->
+    <style>
+      body { margin: 0; background: #111; color: #ccc; font-family: monospace; font-size: 12px; }
+      #log { padding: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="log">loading…</div>
+    <script type="module" src="./diff-xterm.js"></script>
+  </body>
+</html>
