@@ -399,7 +399,34 @@ export class WebGLRenderer {
         flags,
         fr, fg, fb
       );
+
+      // Hyperlink hover underlines (OSC 8 ids and regex-detected ranges),
+      // drawn as overlay rects at the same anchor the canvas renderer
+      // strokes (baseline + 2, 1px). Hover-only, so coalescing per cell
+      // is unnecessary.
+      const hoverUnderline =
+        (cell.hyperlink_id > 0 && cell.hyperlink_id === this.hoveredHyperlinkId) ||
+        (this.hoveredLinkRange !== null && this.cellInLinkRange(x, y, this.hoveredLinkRange));
+      if (hoverUnderline) {
+        this.rectPass.overlays.add(
+          x * cw, rowY + this.metrics.baseline + 2 - 0.5, cw * cell.width, 1,
+          74 / 255, 144 / 255, 226 / 255, 1
+        );
+      }
     }
+  }
+
+  /** Same containment check as the canvas renderer's hoveredLinkRange test. */
+  private cellInLinkRange(
+    x: number,
+    y: number,
+    range: LinkRange
+  ): boolean {
+    return (
+      (y === range.startY && x >= range.startX && (y < range.endY || x <= range.endX)) ||
+      (y > range.startY && y < range.endY) ||
+      (y === range.endY && x <= range.endX && (y > range.startY || x >= range.startX))
+    );
   }
 
   private buildCursorOverlay(

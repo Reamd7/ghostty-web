@@ -16,6 +16,8 @@ import { getTerminalPerfCounters } from './perf-counters';
 import { measureFontMetrics } from './font-metrics';
 export type { FontMetrics } from './font-metrics';
 import { CellFlags, DirtyState } from './types';
+import type { GhosttyCell, ILink } from './types';
+import type { SelectionManager } from './selection-manager';
 
 // Interface for objects that can be rendered
 export interface IRenderable {

@@ -265,6 +265,15 @@ export declare class FitAddon implements ITerminalAddon {
     observeResize(): void;
 }
 
+/**
+ * Shared font metrics — single source of truth for renderer geometry.
+ *
+ * Both CanvasRenderer and WebGLRenderer must derive identical cell
+ * geometry from identical options: selection/link hit testing and the
+ * pixel-diff verification loop (demo/webgl-check.html) depend on it.
+ * Extracted verbatim from CanvasRenderer.measureFont; the canvas
+ * renderer now delegates here.
+ */
 export declare interface FontMetrics {
     width: number;
     height: number;
@@ -1129,6 +1138,11 @@ export declare interface ITerminalOptions {
     /** Cell height multiplier over ascent+descent (e.g. 1.2). Default: legacy +2px. */
     lineHeight?: number;
     allowTransparency?: boolean;
+    /**
+     * Render backend: 'canvas' (2D), 'webgl' (WebGL2 instanced), or 'auto'
+     * (webgl with fallback to canvas when unavailable; default).
+     */
+    renderer?: 'canvas' | 'webgl' | 'auto';
     convertEol?: boolean;
     disableStdin?: boolean;
     smoothScrollDuration?: number;
@@ -1466,6 +1480,13 @@ export declare class LinkDetector {
     dispose(): void;
 }
 
+declare type LinkRange = {
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+};
+
 /**
  * Modifier keys
  */
@@ -1784,7 +1805,7 @@ export declare class Terminal implements ITerminalCore {
     readonly options: Required<ITerminalOptions>;
     private ghostty?;
     wasmTerm?: GhosttyTerminal;
-    renderer?: CanvasRenderer;
+    renderer?: CanvasRenderer | WebGLRenderer;
     private inputHandler?;
     private selectionManager?;
     private canvas?;
@@ -2207,6 +2228,79 @@ export declare class UrlRegexProvider implements ILinkProvider {
      */
     private lineToText;
     dispose(): void;
+}
+
+declare class WebGLRenderer {
+    private canvas;
+    private ctx;
+    private gl;
+    private rectPass;
+    private atlas;
+    private glyphPass;
+    private fontSize;
+    private fontFamily;
+    private fontWeight?;
+    private fontWeightBold?;
+    private lineHeightMultiplier?;
+    private cursorStyle;
+    private cursorBlink;
+    private theme;
+    private devicePixelRatio;
+    private metrics;
+    private hoveredHyperlinkId;
+    private hoveredLinkRange;
+    private cursorVisible;
+    private cursorBlinkInterval?;
+    private lastViewportY;
+    /** Repaint hook for renderer-originated changes (cursor blink). */
+    onRenderRequest: (() => void) | null;
+    private selectionManager?;
+    private currentSelectionCoords;
+    constructor(canvas: HTMLCanvasElement, options?: RendererOptions);
+    private atlasSpec;
+    resize(cols: number, rows: number): void;
+    render(buffer: IRenderable, forceAll?: boolean, viewportY?: number, scrollbackProvider?: IScrollbackProvider, scrollbarOpacity?: number): void;
+    private renderFrame;
+    /**
+     * One row → merged background rects + block-element geometry rects.
+     * Mirrors CanvasRenderer's two-pass contract: all backgrounds precede
+     * all glyphs, so complex scripts can bleed across cell borders.
+     */
+    private buildRowRects;
+    /** Same containment check as the canvas renderer's hoveredLinkRange test. */
+    private cellInLinkRange;
+    private buildCursorOverlay;
+    /** Accent-colored glyph under a block cursor (see CanvasRenderer.renderCursor). */
+    private drawCursorAccentGlyph;
+    private buildScrollbar;
+    private selBg;
+    private selFg;
+    private cursorColor;
+    /** Accent glyph color (0-255) for block-cursor redraw. */
+    private cursorAccent255;
+    /** Current frame's buffer, for grapheme lookups during row builds. */
+    private currentBuffer;
+    /** Same color as 0-255 ints for glyph instance packing. */
+    private selFg255;
+    private isInSelection;
+    setTheme(theme: ITheme): void;
+    setFontSize(size: number): void;
+    setFontFamily(family: string): void;
+    setCursorStyle(style: 'block' | 'underline' | 'bar'): void;
+    setCursorBlink(enabled: boolean): void;
+    remeasureFont(): void;
+    getMetrics(): FontMetrics;
+    getCanvas(): HTMLCanvasElement;
+    setSelectionManager(manager: SelectionManager): void;
+    setHoveredHyperlinkId(hyperlinkId: number): void;
+    setHoveredLinkRange(range: LinkRange | null): void;
+    get charWidth(): number;
+    get charHeight(): number;
+    clear(): void;
+    dispose(): void;
+    private startCursorBlink;
+    private stopCursorBlink;
+    toggleCursorBlink(): void;
 }
 
 export { }

@@ -36,6 +36,7 @@ import { getTerminalPerfCounters } from './perf-counters';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
+import { WebGLRenderer } from './renderers/webgl/renderer';
 import { SelectionManager } from './selection-manager';
 import type { ILink, ILinkProvider } from './types';
 
@@ -66,7 +67,7 @@ export class Terminal implements ITerminalCore {
   // Components (created on open())
   private ghostty?: Ghostty;
   public wasmTerm?: GhosttyTerminal; // Made public for link providers
-  public renderer?: CanvasRenderer; // Made public for FitAddon
+  public renderer?: CanvasRenderer | WebGLRenderer; // Made public for FitAddon
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
   private canvas?: HTMLCanvasElement;
@@ -440,8 +441,9 @@ export class Terminal implements ITerminalCore {
         }
       });
 
-      // Create renderer
-      this.renderer = new CanvasRenderer(this.canvas, {
+      // Create renderer (webgl preferred, canvas fallback — VS Code
+      // gpuAcceleration semantics)
+      const rendererOptions = {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
         fontWeight: this.options.fontWeight,
@@ -450,7 +452,21 @@ export class Terminal implements ITerminalCore {
         cursorStyle: this.options.cursorStyle,
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
-      });
+      };
+      const wanted = this.options.renderer ?? 'auto';
+      if (wanted === 'canvas') {
+        this.renderer = new CanvasRenderer(this.canvas, rendererOptions);
+      } else {
+        try {
+          this.renderer = new WebGLRenderer(this.canvas, rendererOptions);
+        } catch (e) {
+          if (wanted === 'webgl') throw e;
+          // auto: GL unavailable (context limit, headless, GPU block) —
+          // fall back to the canvas renderer for this instance.
+          console.warn('[ghostty-web] WebGL renderer unavailable, falling back to canvas:', e);
+          this.renderer = new CanvasRenderer(this.canvas, rendererOptions);
+        }
+      }
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
       this.renderer.resize(this.cols, this.rows);

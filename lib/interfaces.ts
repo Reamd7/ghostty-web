@@ -21,6 +21,12 @@ export interface ITerminalOptions {
   lineHeight?: number;
   allowTransparency?: boolean;
 
+  /**
+   * Render backend: 'canvas' (2D), 'webgl' (WebGL2 instanced), or 'auto'
+   * (webgl with fallback to canvas when unavailable; default).
+   */
+  renderer?: 'canvas' | 'webgl' | 'auto';
+
   // Phase 1 additions
   convertEol?: boolean; // Convert \n to \r\n (default: false)
   disableStdin?: boolean; // Disable keyboard input (default: false)
