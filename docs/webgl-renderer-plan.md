@@ -77,6 +77,45 @@ mismatch ≤0.5%），失败时 demo 页并排渲染 + 差异热图，肉眼定�
 **实现要点备忘**：blend 开关曾丢失（quad 替换背景的经典症状=字形区全黑/透明）；
 垂直 gutter 引入后装饰 uv 必须重新归一到 cell 盒。
 
+
+## M6 前置：本机性能自测（2026-09-04，demo/webgl-perf.html）
+
+环境：headless Chromium + **AMD Radeon 780M（ANGLE D3D11，真 GPU 非 SwiftShader）**，
+120 帧每场景，render() 墙钟计时。R1/R3 契约随测通过。
+
+### 80×24（常规终端）
+
+| 场景 | Canvas p50/p95 | WebGL p50/p95 | 加速比 |
+|---|---|---|---|
+| idle（空帧） | 0.0 / 0.1 ms | 0.3 / 0.6 ms | —（clear 开销） |
+| stream（逐行输出） | 3.4 / 4.3 ms | **0.3 / 0.6 ms** | ~10× |
+| full（全屏重绘） | 4.0 / 5.7 ms | **0.4 / 0.6 ms** | ~10× |
+
+### 200×60（大网格）
+
+| 场景 | Canvas p50/p95 | WebGL p50/p95 | 加速比 |
+|---|---|---|---|
+| stream | 16.2 / 19.9 ms（超 16.7 预算） | **0.9 / 1.2 ms** | ~18× |
+| full | 34.7 / **126.8 ms**（超预算 7.6×） | **1.0 / 1.2 ms** | ~35× |
+
+### 契约断言
+
+- **R1**：全部 12 组（2 渲染器 × 3 场景 × 2 网格）wasm update() 恰好
+  **1 次/帧**（perf-counters 实测 1.00）。
+- **R3**：Terminal 静态屏（无写入无交互）rAF 调度 **0 次/秒**（连续
+  patch window 实测）——空闲 CPU 归零达成。
+- WebGL full 场景偶发 max 尖峰（80×24 一次 11.3ms）为 atlas 未命中
+  同步光栅化的冷缓存，符合预期（帧内未命中上限策略列入 M6 待办）。
+
+### 决策门结论
+
+原门（research §8）："p95 超预算且 raster 主导 → 立项 WebGL"。
+实测：80×24 下 Canvas 4.3ms 未超预算（该规模 Canvas 够用）；
+**200×60 下 Canvas stream p95 19.9ms、full p95 126.8ms 双超预算，
+WebGL 全场景 ≤1.2ms** —— WebGL 的立项价值在大网格下成立，方向
+事后验证正确。M6（bench/versus.ts 对照 + profile:terminal 生产口径）
+补齐后即可合入。
+
 ## 里程碑
 ```
 M0 → M1 → M2 → M3 → M4 → M5 → M6   （严格串行；M0 = 验证循环载体，

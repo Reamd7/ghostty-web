@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Render performance self-test</title>
+    <!--
+      Local render-perf self-test (revised plan §1.3 contract):
+      Measures render() wall time per frame for both renderers under
+      three scenarios — idle (R3: no frame at all), stream (cat/log
+      output), fullscreen redraw (TUI) — and asserts the R1 contract
+      (one wasm update() per frame) via perf counters.
+      Run headlessly: open the page, call __runPerf().
+    -->
+    <style>
+      body { margin: 0; background: #111; color: #ccc; font-family: monospace; font-size: 12px; }
+      canvas { display: none; }
+      #log { padding: 12px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="log">loading…</div>
+    <script type="module" src="./webgl-perf.js"></script>
+  </body>
+</html>
