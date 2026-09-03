@@ -9,7 +9,6 @@
  *
  * Frame shape mirrors the canvas renderer: beginFrame() (single WASM
  * crossing), shared viewport pool, per-row cell walk, clearDirty() after
- * a completed frame, aborted frames keep dirty state for retry.
  */
 
 import { DEFAULT_THEME, IRenderable, IScrollbackProvider, RendererOptions } from '../../renderer';
@@ -19,7 +18,15 @@ import type { SelectionManager } from '../../selection-manager';
 import { CellFlags, GhosttyCell } from '../../types';
 import { GLContext } from './context';
 import { RectPass } from './rect-pass';
-
+import { GlyphAtlas } from './atlas';
+import {
+  GlyphPass,
+  GLYPH_FLAG_UNDERLINE,
+  GLYPH_FLAG_STRIKE,
+  GLYPH_FLAG_FAINT,
+  GLYPH_FLAG_EMOJI,
+  packInstance,
+} from './glyph-pass';
 type LinkRange = { startX: number; startY: number; endX: number; endY: number };
 
 /** #rrggbb → [r,g,b] floats 0..1 */
@@ -82,20 +89,26 @@ export class WebGLRenderer {
   private ctx: GLContext;
   private gl: WebGL2RenderingContext;
   private rectPass: RectPass;
+  private atlas!: GlyphAtlas;
+  private glyphPass!: GlyphPass;
 
   private fontSize: number;
   private fontFamily: string;
   private fontWeight?: number;
+  private fontWeightBold?: number;
   private lineHeightMultiplier?: number;
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
   private theme: Required<ITheme>;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
-
+  private hoveredHyperlinkId = 0;
+  private hoveredLinkRange: LinkRange | null = null;
   private cursorVisible = true;
   private cursorBlinkInterval?: number;
   private lastViewportY = 0;
+  /** Repaint hook for renderer-originated changes (cursor blink). */
+  public onRenderRequest: (() => void) | null = null;
 
   private selectionManager?: SelectionManager;
   private currentSelectionCoords: {
@@ -104,11 +117,6 @@ export class WebGLRenderer {
     endCol: number;
     endRow: number;
   } | null = null;
-
-  private hoveredHyperlinkId = 0;
-  private hoveredLinkRange: LinkRange | null = null;
-
-  public onRenderRequest: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
     this.canvas = canvas;
@@ -119,6 +127,7 @@ export class WebGLRenderer {
     this.fontSize = options.fontSize ?? 15;
     this.fontFamily = options.fontFamily ?? 'monospace';
     this.fontWeight = options.fontWeight;
+    this.fontWeightBold = options.fontWeightBold;
     this.lineHeightMultiplier =
       typeof options.lineHeight === 'number' && options.lineHeight > 0
         ? options.lineHeight
@@ -134,11 +143,23 @@ export class WebGLRenderer {
       fontWeight: this.fontWeight,
       lineHeight: this.lineHeightMultiplier,
     });
+    this.atlas = new GlyphAtlas(this.gl, this.atlasSpec());
+    this.atlas.warmUp();
+    this.glyphPass = new GlyphPass(this.ctx);
 
     this.gl.enable(this.gl.BLEND);
-    this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
     if (this.cursorBlink) this.startCursorBlink();
+  }
+
+  private atlasSpec() {
+    return {
+      metrics: this.metrics,
+      fontFamily: this.fontFamily,
+      fontSize: this.fontSize,
+      fontWeight: this.fontWeight,
+      fontWeightBold: this.fontWeightBold,
+    };
   }
 
   // ==========================================================================
@@ -215,6 +236,9 @@ export class WebGLRenderer {
         : null;
 
     this.rectPass.beginFrame();
+    this.glyphPass.count = 0;
+    this.glyphPass.ensureCapacity(dims.cols * dims.rows);
+    this.currentBuffer = buffer;
     const bg = hexToRgbFloat(this.theme.background);
     this.gl.clearColor(bg[0], bg[1], bg[2], 1);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
@@ -237,11 +261,16 @@ export class WebGLRenderer {
       this.buildRowRects(cells, offset, y, cols);
     }
 
+    // Cursor first: its rects append to backgrounds (before glyphs) and
+    // its accent glyph appends to instances, so ordering matches canvas.
+    this.buildCursorOverlay(cursor, pool, cols, viewportY, buffer);
+
+    // Backgrounds opaque (straight alpha), glyphs premultiplied.
     this.rectPass.drawBackgrounds();
+    this.gl.blendFunc(this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA);
+    this.glyphPass.draw(this.atlas, this.metrics);
+    this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
-    // M3 draws glyphs here.
-
-    this.buildCursorOverlay(cursor, pool, cols, viewportY);
     if (scrollbackProvider && scrollbarOpacity > 0) {
       this.buildScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
     }
@@ -308,24 +337,68 @@ export class WebGLRenderer {
     }
     flushRun(cols);
 
-    // Block elements: exact geometry in the resolved foreground color.
+    // Second pass: block elements as exact geometry, everything else as
+    // glyph instances. Mirrors renderCellText's color/flag resolution.
     for (let i = offset; i < end; i++) {
       const cell = cells[i];
       if (cell.width === 0 || (cell.flags & CellFlags.INVISIBLE)) continue;
       const x = i - offset;
-      const rects = blockCharRects(cell.codepoint || 32, cw * cell.width, ch);
-      if (!rects) continue;
-      let [r, g, b] = this.isInSelection(x, y)
-        ? this.selFg
-        : cell.flags & CellFlags.INVERSE
-          ? [cell.bg_r / 255, cell.bg_g / 255, cell.bg_b / 255]
-          : [cell.fg_r / 255, cell.fg_g / 255, cell.fg_b / 255];
-      for (const [rx, ry, rw, rh] of rects) {
-        this.rectPass.backgrounds.add(
-          x * cw + rx, rowY + ry, Math.max(0.5, rw), Math.max(0.5, rh),
-          r, g, b, 1
-        );
+
+      // Resolve foreground color (selection > inverse > cell fg), 0-255.
+      let fr: number, fg: number, fb: number;
+      if (this.isInSelection(x, y)) {
+        fr = this.selFg255[0]; fg = this.selFg255[1]; fb = this.selFg255[2];
+      } else if (cell.flags & CellFlags.INVERSE) {
+        fr = cell.bg_r; fg = cell.bg_g; fb = cell.bg_b;
+      } else {
+        fr = cell.fg_r; fg = cell.fg_g; fb = cell.fg_b;
       }
+
+      const rects = blockCharRects(cell.codepoint || 32, cw * cell.width, ch);
+      if (rects) {
+        for (const [rx, ry, rw, rh] of rects) {
+          this.rectPass.backgrounds.add(
+            x * cw + rx, rowY + ry, Math.max(0.5, rw), Math.max(0.5, rh),
+            fr / 255, fg / 255, fb / 255, 1
+          );
+        }
+        continue;
+      }
+
+      // Glyph text: grapheme cluster when present, guarded single codepoint
+      // otherwise (same guards as renderCellText).
+      let text: string;
+      if (cell.grapheme_len > 0 && this.currentBuffer?.getGraphemeString) {
+        text = this.currentBuffer.getGraphemeString(y, x);
+      } else {
+        const cp = cell.codepoint;
+        if (cp === 32 || cp === 0) continue; // blank: no geometry needed
+        text =
+          cp == null || cp <= 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)
+            ? ' '
+            : String.fromCodePoint(cp);
+      }
+
+      const bold = (cell.flags & CellFlags.BOLD) !== 0;
+      const italic = (cell.flags & CellFlags.ITALIC) !== 0;
+      const entry = this.atlas.get(text, bold, italic);
+      if (!entry) continue;
+
+      let flags = 0;
+      if (cell.flags & CellFlags.UNDERLINE) flags |= GLYPH_FLAG_UNDERLINE;
+      if (cell.flags & CellFlags.STRIKETHROUGH) flags |= GLYPH_FLAG_STRIKE;
+      if (cell.flags & CellFlags.FAINT) flags |= GLYPH_FLAG_FAINT;
+      if (entry.emoji) flags |= GLYPH_FLAG_EMOJI;
+
+      packInstance(
+        this.glyphPass.instances,
+        this.glyphPass.count++,
+        x, y,
+        cell.width > 1,
+        entry.id,
+        flags,
+        fr, fg, fb
+      );
     }
   }
 
@@ -333,18 +406,26 @@ export class WebGLRenderer {
     cursor: { x: number; y: number; visible: boolean },
     pool: GhosttyCell[] | null,
     cols: number,
-    viewportY: number
+    viewportY: number,
+    buffer: IRenderable
   ): void {
     if (viewportY !== 0 || !cursor.visible || !this.cursorVisible) return;
     const cw = this.metrics.width;
     const ch = this.metrics.height;
-    const x = Math.min(cursor.x, cols - 1) * cw;
+    const cellX = Math.min(cursor.x, cols - 1);
+    const x = cellX * cw;
     const y = cursor.y * ch;
     const [r, g, b] = this.cursorColor;
-    const o = this.rectPass.overlays;
+    // Cursor rects go into the background list: appended after cell
+    // backgrounds, drawn before glyphs — the accent glyph then sits on
+    // top of the cursor block, matching renderCursor's paint order.
+    const o = this.rectPass.backgrounds;
     switch (this.cursorStyle) {
       case 'block':
         o.add(x, y, cw, ch, r, g, b, 1);
+        // Re-draw the glyph under the cursor with the accent color, like
+        // renderCursor does (glyph pass already ran, so paint after it).
+        this.drawCursorAccentGlyph(buffer, pool, cellX, cursor.y, cols);
         break;
       case 'underline': {
         const h = Math.max(2, Math.floor(ch * 0.15));
@@ -357,7 +438,57 @@ export class WebGLRenderer {
         break;
       }
     }
-    void pool; // M3 re-draws the glyph under a block cursor with accent color
+  }
+
+  /** Accent-colored glyph under a block cursor (see CanvasRenderer.renderCursor). */
+  private drawCursorAccentGlyph(
+    buffer: IRenderable,
+    pool: GhosttyCell[] | null,
+    cellX: number,
+    cellY: number,
+    cols: number
+  ): void {
+    const cell = pool ? pool[cellY * cols + cellX] : buffer.getLine(cellY)?.[cellX];
+    if (!cell || cell.width === 0 || (cell.flags & CellFlags.INVISIBLE)) return;
+    if (blockCharRects(cell.codepoint || 32, this.metrics.width * cell.width, this.metrics.height)) {
+      // Block chars were drawn as rects in fg color; redraw in accent.
+      const rects = blockCharRects(cell.codepoint || 32, this.metrics.width * cell.width, this.metrics.height)!;
+      const [ar, ag, ab] = this.cursorAccent255;
+      for (const [rx, ry, rw, rh] of rects) {
+        this.rectPass.overlays.add(
+          cellX * this.metrics.width + rx, cellY * this.metrics.height + ry,
+          Math.max(0.5, rw), Math.max(0.5, rh),
+          ar / 255, ag / 255, ab / 255, 1
+        );
+      }
+      return;
+    }
+    let text: string;
+    if (cell.grapheme_len > 0 && buffer.getGraphemeString) {
+      text = buffer.getGraphemeString(cellY, cellX);
+    } else {
+      const cp = cell.codepoint;
+      if (cp === 32 || cp === 0) return;
+      text = cp == null || cp <= 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)
+        ? ' '
+        : String.fromCodePoint(cp);
+    }
+    const entry = this.atlas.get(text, (cell.flags & CellFlags.BOLD) !== 0, (cell.flags & CellFlags.ITALIC) !== 0);
+    if (!entry) return;
+    let flags = 0;
+    if (cell.flags & CellFlags.UNDERLINE) flags |= GLYPH_FLAG_UNDERLINE;
+    if (cell.flags & CellFlags.STRIKETHROUGH) flags |= GLYPH_FLAG_STRIKE;
+    if (entry.emoji) flags |= GLYPH_FLAG_EMOJI;
+    const [ar, ag, ab] = this.cursorAccent255;
+    packInstance(
+      this.glyphPass.instances,
+      this.glyphPass.count++,
+      cellX, cellY,
+      cell.width > 1,
+      entry.id,
+      flags,
+      ar, ag, ab
+    );
   }
 
   private buildScrollbar(
@@ -391,6 +522,12 @@ export class WebGLRenderer {
   private selBg: [number, number, number] = [0.8, 0.8, 0.8];
   private selFg: [number, number, number] = [0.12, 0.12, 0.12];
   private cursorColor: [number, number, number] = [1, 1, 1];
+  /** Accent glyph color (0-255) for block-cursor redraw. */
+  private cursorAccent255: [number, number, number] = [30, 30, 30];
+  /** Current frame's buffer, for grapheme lookups during row builds. */
+  private currentBuffer: IRenderable | null = null;
+  /** Same color as 0-255 ints for glyph instance packing. */
+  private selFg255: [number, number, number] = [31, 31, 31];
 
   private isInSelection(x: number, y: number): boolean {
     const sel = this.currentSelectionCoords;
@@ -411,7 +548,18 @@ export class WebGLRenderer {
     this.theme = { ...DEFAULT_THEME, ...theme };
     this.selBg = hexToRgbFloat(this.theme.selectionBackground);
     this.selFg = hexToRgbFloat(this.theme.selectionForeground);
+    this.selFg255 = [
+      Math.round(this.selFg[0] * 255),
+      Math.round(this.selFg[1] * 255),
+      Math.round(this.selFg[2] * 255),
+    ];
     this.cursorColor = hexToRgbFloat(this.theme.cursor);
+    const accent = hexToRgbFloat(this.theme.cursorAccent);
+    this.cursorAccent255 = [
+      Math.round(accent[0] * 255),
+      Math.round(accent[1] * 255),
+      Math.round(accent[2] * 255),
+    ];
   }
 
   public setFontSize(size: number): void {
