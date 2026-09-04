@@ -2249,7 +2249,7 @@ export declare class UrlRegexProvider implements ILinkProvider {
     dispose(): void;
 }
 
-declare class WebGLRenderer {
+export declare class WebGLRenderer {
     private canvas;
     private ctx;
     private gl;

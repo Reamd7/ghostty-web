@@ -4622,6 +4622,7 @@ export {
   ZA as SelectionManager,
   VA as Terminal,
   SA as UrlRegexProvider,
+  OA as WebGLRenderer,
   jA as getGhostty,
   _A as init
 };

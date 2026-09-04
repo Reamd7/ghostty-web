@@ -84,6 +84,7 @@ export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types
 
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';
+export { WebGLRenderer } from './renderers/webgl/renderer';
 export type { RendererOptions, FontMetrics, IRenderable } from './renderer';
 export { InputHandler } from './input-handler';
 export { EventEmitter } from './event-emitter';
