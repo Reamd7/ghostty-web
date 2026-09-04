@@ -104,6 +104,14 @@ export class Terminal implements ITerminalCore {
   private isDisposed = false;
   /** Pending on-demand render frame (coalesced: at most one rAF at a time). */
   private renderFramePending = false;
+  /**
+   * Full-screen apps live on the alternate screen and repaint with
+   * cursor-addressed partial updates whose dirty propagation has proven
+   * intermittent (btop leaves stale/blank frames). While the alternate
+   * screen is active, every write forces a full-frame render — the
+   * repaint cost is bounded (full redraw measured 0.4ms webgl / 4ms
+   * canvas at 80x24) and alt-screen apps own the whole screen anyway.
+   */
   private renderFrameId?: number;
   /** Write callbacks, flushed after the render that includes their write. */
   private writeCallbacks: Array<() => void> = [];
@@ -159,6 +167,7 @@ export class Terminal implements ITerminalCore {
       fontWeightBold: options.fontWeightBold,
       lineHeight: options.lineHeight,
       allowTransparency: options.allowTransparency ?? false,
+      renderer: options.renderer ?? 'auto',
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll

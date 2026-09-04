@@ -421,12 +421,12 @@ export class CanvasRenderer {
       // Mark cursor lines as needing redraw
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
         // Need to redraw cursor line
-        if (!drawScreenRow(cursor.y)) return;
+        if (!drawScreenRow(cursor.y)) { this.onRenderRequest?.(); return; } // pool failed: keep dirty + re-schedule the retry frame
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
         // Also redraw old cursor line if cursor moved to different line
         if (!forceAll && !buffer.isRowDirty(this.lastCursorPosition.y)) {
-          if (!drawScreenRow(this.lastCursorPosition.y)) return;
+          if (!drawScreenRow(this.lastCursorPosition.y)) { this.onRenderRequest?.(); return; } // pool failed: keep dirty + re-schedule the retry frame
         }
       }
     }
@@ -593,10 +593,10 @@ export class CanvasRenderer {
         }
       } else if (viewportY > 0) {
         // This row is from visible screen (lower part of viewport)
-        if (!drawScreenRow(y - floorViewportY)) return;
+        if (!drawScreenRow(y - floorViewportY)) { this.onRenderRequest?.(); return; } // pool failed: keep dirty + re-schedule the retry frame
       } else {
         // At bottom - fetch from visible screen
-        if (!drawScreenRow(y)) return;
+        if (!drawScreenRow(y)) { this.onRenderRequest?.(); return; } // pool failed: keep dirty + re-schedule the retry frame
       }
     }
 

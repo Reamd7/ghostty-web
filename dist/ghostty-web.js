@@ -3730,6 +3730,7 @@ class WA {
       fontWeightBold: A.fontWeightBold,
       lineHeight: A.lineHeight,
       allowTransparency: A.allowTransparency ?? !1,
+      renderer: A.renderer ?? "auto",
       convertEol: A.convertEol ?? !1,
       disableStdin: A.disableStdin ?? !1,
       smoothScrollDuration: A.smoothScrollDuration ?? 100

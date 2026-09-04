@@ -228,7 +228,14 @@ export class WebGLRenderer {
     forceAll = true;
 
     const pool = buffer.getViewportPool ? buffer.getViewportPool() : null;
-    if (pool === null && viewportY === 0) return; // extraction failed: keep dirty, retry next frame
+    if (pool === null && viewportY === 0) {
+      // Extraction failed: keep dirty state — but the rAF that ran this
+      // render is consumed, so nobody would retry otherwise. Schedule one
+      // more frame; btop-style partial updates after this point would
+      // otherwise leave stale content on screen forever.
+      this.onRenderRequest?.();
+      return;
+    }
 
     this.currentSelectionCoords =
       this.selectionManager && this.selectionManager.hasSelection()

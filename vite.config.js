@@ -5,6 +5,13 @@ export default defineConfig({
   server: {
     port: 8000,
     allowedHosts: ['.coder'],
+    // Demo PTY server proxy: lets demo/index.html (served by vite with
+    // live TS transforms of lib/) reach the node PTY backend for real
+    // shell interaction testing.
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/ws': { target: 'ws://127.0.0.1:8080', ws: true },
+    },
   },
   plugins: [
     dts({

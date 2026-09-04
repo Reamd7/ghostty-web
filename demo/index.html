@@ -143,6 +143,7 @@
         await init();
 
         term = new Terminal({
+          renderer: new URLSearchParams(location.search).get('renderer') ?? 'auto',
           cursorBlink: true,
           fontSize: 14,
           fontFamily: 'Monaco, Menlo, "Courier New", monospace',
@@ -157,6 +158,7 @@
         term.loadAddon(fitAddon);
 
         term.open(document.getElementById('terminal-container'));
+        window.term = term; // exposed for debugging/testing harnesses
         fitAddon.fit();
         fitAddon.observeResize(); // Auto-fit when container resizes
 
