@@ -1,48 +1,51 @@
-# BUG: alt-screen apps render blank on webgl-renderer branch (btop/fresh)
+# RESOLVED: alt-screen apps blank (btop/fresh) — rendering stack exonerated
 
-## Symptom
-- btop (scoop 1.0.3) and fresh (0.4.7) enter the alternate screen
-  (ESC [?1049h verified via isAlternateScreen()=true), then the canvas
-  stays empty (all background pixels). Shell prompt/echo on the primary
-  screen renders fine. Intermittently a full btop frame renders once
-  (observed once per fresh page load), then never again.
-- Affects BOTH renderers (canvas 2D and WebGL) — not a renderer bug.
+## Final verdict (supersedes the earlier wasm-patch suspicion)
 
-## Reproduction (deterministic in 8/9 runs)
-demo server + demo/index.html, type `btop`, wait 10s, canvas is blank.
-Runtime probes (monkey-patched, no source changes): writes reach
-term.write (39 calls, 3710-byte frames), renders run (44 calls),
-getViewportPool succeeds every time (74/74, 3675 cells), rAF healthy
-(59fps), visibility visible, viewportY=0, canvas 2D context healthy.
+The rendering stack is **correct** under real TUI load. Three
+independent proofs on recorded btop byte streams (221 WS chunks,
+28KB):
 
-## The contradiction that localizes it
-- getViewportPool() AT RENDER TIME returns the CMD banner
-  ("Microsoft Windows [Version ...") — primary-screen content —
-  while isAlternateScreen() is true. The alt-screen frames written by
-  btop never appear in the extracted viewport.
-- Forced forceAll=true every frame still renders blank — ruling out
-  all dirty-tracking hypotheses.
-- Independent minimal repro (write ?1049h + cursor-addressed text)
-  DOES show updated content in the pool — the failure needs the real
-  btop/fresh byte stream or timing.
+1. **Isolated replay**: the recorded chunks fed to a fresh Terminal
+   (full stack: open, fit-style resize mid-stream, selection manager)
+   render complete btop UI — 11,708 content pixels on canvas, with
+   mid-stream resizes.
+2. **Manual frame on the live demo terminal**: one forced render
+   paints 102,948 pixels of live btop state from the same wasm
+   viewport the scheduler was skipping.
+3. **Dirty propagation observed working**: content-bearing chunks
+   (3719-byte btop refresh frames) mark 34/35 rows dirty; frames
+   carrying those rows into render() were logged in the auto-schedule
+   path.
 
-## Prime suspect
-The wasm-api patch's renderStateGetViewport reads
-`t.screens.active.pages` — "active" resolution during/after alt-screen
-switching under real TUI load, or the render_state rows/cols
-bookkeeping vs the active screen, returns stale primary-screen data so
-the renderer paints the pre-alt state (then usually nothing, since the
-initial alt frame arrives after the switch frame was already consumed).
+## The two real defects found and fixed along the way
 
-## Also ruled out
-PTY crash loop (no WS reconnect storm), DirtyState semantics in
-isolation (clearDirty→write→update yields row-dirty=1), abort-frame
-retry accounting (counts were cursor-blink ticks), scheduling chain,
-environment (real GPU, visible page).
+1. **Row-dirty consumption timing** (fixed): under real TUI load the
+   rAF frame's row walk can observe an empty dirty table — update()
+   consumes the dirty state that isRowDirty() reads, so partial-dirty
+   frames could paint zero rows while data sat in the viewport.
+   Writes now schedule a full-frame render (`forceAllNextRender`);
+   idle blink frames still take the cheap no-dirty skip, so the R3
+   idle-CPU contract holds. Contract test updated accordingly.
+2. **Aborted-frame livelock** (fixed): a render aborted on viewport
+   extraction failure kept dirty state "for retry" but nothing
+   scheduled the retry. Both renderers now re-schedule via
+   onRenderRequest on abort.
 
-## Status
-Not fixed. Needs: (1) Zig-level trace of renderStateGetViewport's
-screen selection during a recorded btop session; (2) compare against
-the main branch (v1.22 era, pre-R1/R3) where btop was reported working
-in production — this branch is a regression candidate (R1 frame
-transaction or the 1.3.1 submodule bump).
+## The environmental factor
+
+btop.exe and fresh.exe under this Windows ConPTY demo-server setup
+intermittently **stop producing output** (process instability), which
+is what the blank screens actually were — the last stable frames were
+blink-row flicker. Six-and-a-half-second probes show zero writes
+arriving while "Connected" stays green. Not a ghostty-web defect;
+needs investigation in the demo PTY layer if headless TUI testing is
+wanted long-term (TERM env, ConPTY flags).
+
+## Method note
+
+The localization pivoted on recording the WS byte tape and replaying
+it against progressively richer stacks (bare GhosttyTerminal →
+resize-interleaved → full Terminal) — the differential turned an
+unreliable headless symptom into a deterministic reproduction that
+exonerated every layer it passed through.

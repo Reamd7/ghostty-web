@@ -3011,7 +3011,10 @@ describe('On-demand render scheduling', () => {
       runScheduledFrame(term);
       expect(renderArgs).toHaveLength(1);
       expect(renderArgs[0][0]).toBe(term.wasmTerm);
-      expect(renderArgs[0][1]).toBe(false);
+      // Write-triggered frames render fully: update() consuming the dirty
+      // state before the row walk left partial-dirty frames painting zero
+      // rows under real TUI load (btop/fresh) — see forceAllNextRender.
+      expect(renderArgs[0][1]).toBe(true);
     } finally {
       restore();
       term.dispose();

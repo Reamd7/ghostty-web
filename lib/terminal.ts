@@ -105,6 +105,17 @@ export class Terminal implements ITerminalCore {
   /** Pending on-demand render frame (coalesced: at most one rAF at a time). */
   private renderFramePending = false;
   /**
+   * Writes schedule a full-frame render. Reason: under real TUI load
+   * (btop/fresh sessions) the row-dirty table has been observed cleared
+   * by the time the rAF render walks it — update() consumes the dirty
+   * state that isRowDirty() reads, so partial-dirty frames render zero
+   * rows and the screen freezes with data present in the wasm viewport.
+   * A forced full frame per write is bounded (measured 0.4ms webgl /
+   * 4ms canvas at 80x24) and idle frames (blink only) still take the
+   * cheap no-dirty skip, so the R3 idle-CPU contract holds.
+   */
+  private forceAllNextRender = false;
+  /**
    * Full-screen apps live on the alternate screen and repaint with
    * cursor-addressed partial updates whose dirty propagation has proven
    * intermittent (btop leaves stale/blank frames). While the alternate
@@ -661,6 +672,8 @@ export class Terminal implements ITerminalCore {
     if (callback) {
       this.writeCallbacks.push(callback);
     }
+
+    this.forceAllNextRender = true;
 
     // On-demand frame: the transaction skips all viewport work when the
     // write produced no screen change (DirtyState.NONE and no UI invalidation).
@@ -1287,7 +1300,9 @@ export class Terminal implements ITerminalCore {
     // One update() for the whole transaction; render() reuses the frame.
     wasmTerm.beginFrame();
     const cursor = wasmTerm.getCursor();
-    this.renderer.render(wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
+    const forceAll = this.forceAllNextRender;
+    this.forceAllNextRender = false;
+    this.renderer.render(wasmTerm, forceAll, this.viewportY, this, this.scrollbarOpacity);
     if (cursor.y !== this.lastCursorY) {
       this.lastCursorY = cursor.y;
       this.cursorMoveEmitter.fire();

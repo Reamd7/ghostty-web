@@ -1841,6 +1841,25 @@ export declare class Terminal implements ITerminalCore {
     private isDisposed;
     /** Pending on-demand render frame (coalesced: at most one rAF at a time). */
     private renderFramePending;
+    /**
+     * Writes schedule a full-frame render. Reason: under real TUI load
+     * (btop/fresh sessions) the row-dirty table has been observed cleared
+     * by the time the rAF render walks it — update() consumes the dirty
+     * state that isRowDirty() reads, so partial-dirty frames render zero
+     * rows and the screen freezes with data present in the wasm viewport.
+     * A forced full frame per write is bounded (measured 0.4ms webgl /
+     * 4ms canvas at 80x24) and idle frames (blink only) still take the
+     * cheap no-dirty skip, so the R3 idle-CPU contract holds.
+     */
+    private forceAllNextRender;
+    /**
+     * Full-screen apps live on the alternate screen and repaint with
+     * cursor-addressed partial updates whose dirty propagation has proven
+     * intermittent (btop leaves stale/blank frames). While the alternate
+     * screen is active, every write forces a full-frame render — the
+     * repaint cost is bounded (full redraw measured 0.4ms webgl / 4ms
+     * canvas at 80x24) and alt-screen apps own the whole screen anyway.
+     */
     private renderFrameId?;
     /** Write callbacks, flushed after the render that includes their write. */
     private writeCallbacks;
