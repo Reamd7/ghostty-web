@@ -65,14 +65,32 @@ mismatch ≤0.5%），失败时 demo 页并排渲染 + 差异热图，肉眼定�
 | M3 glyph pass | ✅ | 4 场景全过（tol16/pct≤2/mean≤1.5）：s1 0 / s2 1.75 / s3 0.19 / s4 0.55（%） |
 | M4 叠加层 | ✅ | hover 下划线（OSC8+regex）；光标三式+accent、选区、滚动条、shader 画线自 M1-M3 递进 |
 | M5 集成+降级 | ✅ | Terminal renderer:'auto' 默认走 WebGL（真 PTY demo 会话验证）；降级路径代码审阅级 |
-| M6 基准 | ⬜ | bench/versus.ts 对照 + profile:terminal 数字（合入门禁数据） |
+| M6 基准 | ✅ | 见下方 M6 数字（三层数据齐：VT 吞吐 / 真浏览器渲染分段 / Electron 实测）|
 
 **已知残差**（验收口径内，记录在案）：
 - bold 字形 AA 相位差（atlas 光栅化 vs 直绘 fillText）——纹理路径本质属性，addon-webgl 同样存在；
 - italic 溢出靠 1+2px gutter 近似（canvas 直绘无裁剪概念）；
 - shader 画线（smoothstep）vs canvas stroke 的 1px 边缘形状差。
 
-**验证待办**：真机交互矩阵（拖选手感/hover 命中/滚动跟手性）；--disable-webgl 降级实测；M6 基准。
+**验证待办**：真机交互矩阵（拖选手感/hover 命中/滚动跟手性）；--disable-webgl 降级实测。
+
+### M6 数字（2026-09-04 收敛）
+
+三层数据已齐，无需新增测量载体：
+
+1. **VT 吞吐（bench/versus.ts，node/happydom，auto→canvas 回退路径）**
+   — ghostty-web 对 xterm.js 稳定 1-10× 优势（raw bytes 1MB：
+   4.80 vs 15.56 ms；color text 10k 行： 26.07 vs 30.83 ms），
+   与 WebGL 落地前无回归。
+2. **渲染分段（demo/webgl-perf.html，真 GPU：Radeon 780M D3D11）**
+   — 见"M6 前置"表：80×24 GL 0.3ms vs Canvas 3.4ms；200×60 全屏
+   GL ≤1.2ms vs Canvas 126.8ms（超预算 7.6×）。
+3. **端到端实测（bench:terminal，Electron 真 PTY）**
+   — cat 200MiB：IPC 17.3 MiB/s / WS 13.3；DOOM-fire 208×61：
+   ~100+ fps（及格线 23-42）。
+
+**合入判定**：决策门满足（大网格 raster 主导超预算 + GL 全绿），
+webgl-renderer 分支已合入 fork main（2e32f0a），产品经 dist 消费。
 
 **实现要点备忘**：blend 开关曾丢失（quad 替换背景的经典症状=字形区全黑/透明）；
 垂直 gutter 引入后装饰 uv 必须重新归一到 cell 盒。
